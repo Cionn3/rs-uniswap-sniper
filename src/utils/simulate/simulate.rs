@@ -1,5 +1,4 @@
 use ethers::prelude::*;
-use ethers::types::transaction::eip2930::AccessList;
 use revm::primitives::{
     ExecutionResult,
     Output,
@@ -8,64 +7,15 @@ use revm::primitives::{
     B160 as rAddress,
 };
 use anyhow::anyhow;
-use super::{ commit_pending_tx, commit_tx_with_inspector, commit_tx_with_access_list, commit_tx };
+use super::*;
 use crate::forked_db::fork_db::ForkDB;
-use crate::oracles::pair_oracle::Pool;
 use crate::oracles::block_oracle::BlockInfo;
-use crate::utils::inject_evm::setup_block_state;
-use crate::utils::tx::sniper::call_data::{ encode_swap, create_withdraw_data };
-use crate::utils::helpers::{
-    get_my_address,
-    get_admin_address,
-    get_snipe_contract_address,
-    get_weth_address,
-};
+use crate::utils::helpers::*;
 use ethers::abi::Tokenizable;
 use ethabi::{ RawLog, Event };
-use super::{
-    IsSafu,
-    SalmonellaInspectoooor,
-    get_balance_of_evm,
-    simulate_token_call,
-};
+use crate::utils::types::structs::*;
 
-use crate::bot::TxData;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SnipeTx {
-    pub tx_call_data: Bytes,
-    pub sniper_contract_address: Address,
-    pub access_list: AccessList,
-    pub gas_used: u64,
-    pub pool: Pool,
-    pub amount_in: U256,
-    pub block_bought: U64,
-    pub pending_tx: Transaction,
-}
-
-impl SnipeTx {
-    pub fn new(
-        tx_call_data: Bytes,
-        sniper_contract_address: Address,
-        access_list: AccessList,
-        gas_used: u64,
-        pool: Pool,
-        amount_in: U256,
-        block_bought: U64,
-        pending_tx: Option<Transaction>
-    ) -> Self {
-        SnipeTx {
-            tx_call_data,
-            sniper_contract_address,
-            access_list,
-            gas_used,
-            pool,
-            amount_in,
-            block_bought,
-            pending_tx: pending_tx.unwrap_or_default(),
-        }
-    }
-}
 
 // Checks if the token has taxes
 // we use a resonable amount of weth cause of the price impact
@@ -81,7 +31,7 @@ pub fn tax_check(
     evm.database(fork_db.clone());
 
     // setup the next block state
-    setup_block_state(&mut evm, &next_block);
+    setup_block_state(&mut evm, next_block);
 
     // if we have a pending tx simulate it
     if let Some(tx) = pending_tx.clone() {
@@ -115,7 +65,7 @@ pub fn tax_check(
     let amount_in_token = get_balance_of_evm(
         pool.token_1, // shitcoin
         get_snipe_contract_address(),
-        &next_block,
+        next_block,
         &mut evm
     )?;
 
@@ -139,7 +89,7 @@ pub fn tax_check(
     let final_amount_weth = get_balance_of_evm(
         pool.token_0, // weth
         get_snipe_contract_address(),
-        &next_block,
+        next_block,
         &mut evm
     )?;
 
@@ -163,7 +113,7 @@ pub fn tax_check(
     evm.database(fork_db);
 
     // ** setup the next block state
-    setup_block_state(&mut evm, &next_block);
+    setup_block_state(&mut evm, next_block);
 
     if let Some(tx) = pending_tx {
         // first simulate and commit the pending tx so we can buy the token
@@ -197,7 +147,7 @@ pub fn tax_check(
     let amount_in_token = get_balance_of_evm(
         pool.token_1, // shitcoin
         get_snipe_contract_address(),
-        &next_block,
+        next_block,
         &mut evm
     )?;
 
@@ -221,7 +171,7 @@ pub fn tax_check(
     let final_amount_weth = get_balance_of_evm(
         pool.token_0, // weth
         get_snipe_contract_address(),
-        &next_block,
+        next_block,
         &mut evm
     )?;
 
@@ -254,7 +204,7 @@ pub fn transfer_check(
     evm.database(fork_db);
 
     // setup the next block state
-    setup_block_state(&mut evm, &next_block);
+    setup_block_state(&mut evm, next_block);
 
     if let Some(tx) = pending_tx {
         // first simulate and commit the pending tx so we can buy the token
@@ -288,7 +238,7 @@ pub fn transfer_check(
     let amount_in_token = get_balance_of_evm(
         pool.token_1, // shitcoin
         get_snipe_contract_address(),
-        &next_block,
+        next_block,
         &mut evm
     )?;
 
@@ -304,7 +254,7 @@ pub fn transfer_check(
     let amount_token_in_admin = get_balance_of_evm(
         pool.token_1, // shitcoin
         get_admin_address(),
-        &next_block,
+        next_block,
         &mut evm
     )?;
 
@@ -327,12 +277,12 @@ pub fn generate_buy_tx_data(
     evm.database(fork_db);
 
     // setup the next block state
-    setup_block_state(&mut evm, &next_block);
+    setup_block_state(&mut evm, next_block);
 
 
     if let Some(ref tx) = pending_tx {
         // first simulate and commit the pending tx so we can buy the token
-        commit_pending_tx(&mut evm, &tx)?;
+        commit_pending_tx(&mut evm, tx)?;
     };
 
     // enable checks
@@ -357,7 +307,7 @@ pub fn generate_buy_tx_data(
         get_balance_of_evm(
             pool.token_1, // shitcoin
             get_snipe_contract_address(),
-            &next_block,
+            next_block,
             &mut evm
         )?;
 
@@ -382,8 +332,9 @@ pub fn generate_buy_tx_data(
             get_snipe_contract_address(),
             access_list,
             gas_used,
-            pool.clone(),
+            *pool,
             amount_in_weth,
+            *TARGET_AMOUNT_TO_SELL,
             next_block.number,
             Some(tx.clone())
         )
@@ -649,7 +600,7 @@ pub fn get_touched_pools(
     evm.database(fork_db);
 
     // setup the next block state
-    setup_block_state(&mut evm, &next_block);
+    setup_block_state(&mut evm, next_block);
 
     // disable checks
     evm.env.cfg.disable_base_fee = true;
@@ -879,5 +830,5 @@ pub fn get_pair(
         (token_1, token_0, reserve_1)
     };
 
-    Ok((pool_address.clone(), weth.clone(), token_1.clone(), weth_reserve.clone()))
+    Ok((pool_address, weth, token_1, weth_reserve))
 }

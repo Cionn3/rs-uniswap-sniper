@@ -3,39 +3,19 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 
-use crate::oracles::AntiRugOracle;
 use crate::utils::helpers::{ create_local_client, convert_wei_to_ether };
-use crate::oracles::block_oracle::NewBlockEvent;
 
 use crate::bot::send_normal_tx::send_normal_tx;
 
 use super::BlockInfo;
 use crate::utils::simulate::simulate::{ simulate_sell, generate_sell_tx_data };
 use crate::utils::simulate::insert_pool_storage;
-use crate::bot::bot_runner::NewSnipeTxEvent;
-use crate::utils::simulate::SnipeTx;
 use crate::bot::bot_config::BotConfig;
 use crate::forked_db::fork_factory::ForkFactory;
+use crate::utils::types::{structs::{SnipeTx, SellOracle, AntiRugOracle}, events::{NewSnipeTxEvent, NewBlockEvent}};
 use anyhow::anyhow;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SellOracle {
-    pub tx_data: Vec<SnipeTx>,
-}
 
-impl SellOracle {
-    pub fn new() -> Self {
-        SellOracle { tx_data: Vec::new() }
-    }
-
-    pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.push(tx_data);
-    }
-
-    pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.retain(|x| x != &tx_data);
-    }
-}
 
 // ** Pushes the new snipe tx data to the SellOracle
 pub fn push_tx_data_to_sell_oracle(
@@ -83,7 +63,7 @@ pub fn start_sell_oracle(
                 let snipe_txs = &oracle.tx_data;
 
                 // ** if there are no txs in the oracle, continue
-                if snipe_txs.len() == 0 {
+                if snipe_txs.is_empty() {
                     continue;
                 }
 
@@ -110,38 +90,15 @@ pub fn start_sell_oracle(
                     let client = client.clone();
 
                     // ** The pool of the token we are selling
-                    let pool = tx.pool.clone();
+                    let pool = tx.pool;
 
                     // ** The Initial Amount in in WETH
-                    let initial_amount_in = tx.amount_in.clone();
+                    let initial_amount_in = tx.amount_in;
 
-                    // target amount to sell
-                    // by default we are looking for 2x
-                    let mut target_amount_weth;
+                    // ** The Target Amount to sell in WETH
+                    let mut target_amount_weth = tx.target_amount_weth;
 
                     let next_block = next_block.clone();
-                    let one_eth = U256::from(1000000000000000000u128);
-                    let two_eth = U256::from(2000000000000000000u128);
-                    let five_eth = U256::from(5000000000000000000u128);
-
-                    // match pool.weth_liquidity to set different lvls for target_amount_weth
-                    match tx.pool.weth_liquidity {
-                        liq if liq >= one_eth && liq <= two_eth => {
-                            // ** if liquidity is between 1 and 2 eth
-                            // ** we are looking for 3x
-                            target_amount_weth = initial_amount_in * 3;
-                        }
-                        liq if liq > two_eth && liq <= five_eth => {
-                            // ** if liquidity is between 2 and 3 eth
-                            // ** we are looking for 2x
-                            target_amount_weth = initial_amount_in * 2;
-                        }
-                        _ => {
-                            // ** if liquidity is more than 5 eth
-                            // ** we are looking for 1.5x
-                            target_amount_weth = (initial_amount_in * 15) / 10;
-                        }
-                    }
 
                     // ** check the price concurrently
                     tokio::spawn(async move {
@@ -170,7 +127,7 @@ pub fn start_sell_oracle(
                                     client.clone(),
                                     tx.clone(),
                                     next_block.clone(),
-                                    latest_block_number.clone(),
+                                    latest_block_number,
                                     shared_oracle_clone.clone(),
                                     anti_rug_oracle.clone(),
                                     target_price_difference
@@ -198,7 +155,7 @@ pub fn start_sell_oracle(
                                     client.clone(),
                                     tx.clone(),
                                     next_block.clone(),
-                                    latest_block_number.clone(),
+                                    latest_block_number,
                                     shared_oracle_clone.clone(),
                                     anti_rug_oracle.clone(),
                                     target_price_difference
@@ -227,7 +184,7 @@ pub fn start_sell_oracle(
                                     client.clone(),
                                     tx.clone(),
                                     next_block.clone(),
-                                    latest_block_number.clone(),
+                                    latest_block_number,
                                     shared_oracle_clone.clone(),
                                     anti_rug_oracle.clone(),
                                     target_price_difference
@@ -256,7 +213,7 @@ pub fn start_sell_oracle(
                                     client.clone(),
                                     tx.clone(),
                                     next_block.clone(),
-                                    latest_block_number.clone(),
+                                    latest_block_number,
                                     shared_oracle_clone.clone(),
                                     anti_rug_oracle.clone(),
                                     target_price_difference
@@ -279,8 +236,8 @@ pub fn start_sell_oracle(
                         let cache_db = match
                             insert_pool_storage(
                                 client.clone(),
-                                pool.clone(),
-                                latest_block_number.clone()
+                                pool,
+                                latest_block_number
                             ).await
                         {
                             Ok(cache_db) => cache_db,
@@ -329,6 +286,9 @@ pub fn start_sell_oracle(
                             if amount_out_weth < (initial_amount_in * 8) / 10 {
                                 // set the target_amount_weth to 1.5x
                                 target_amount_weth = (initial_amount_in * 15) / 10;
+                                // update the target_amount_weth in the oracle
+                                let mut oracle = shared_oracle_clone.lock().await;
+                                oracle.update_target_amount(tx.clone(), target_amount_weth);
                                 log::warn!("Got a bad position, changed target amount to 1.5x");
                             } else {
                                 log::info!("Position is good");
@@ -354,7 +314,7 @@ pub fn start_sell_oracle(
                             // ** generate tx_data
                             let tx_data = match
                                 generate_sell_tx_data(
-                                    pool.clone(),
+                                    pool,
                                     next_block.clone(),
                                     fork_factory.new_sandbox_fork()
                                 )
@@ -383,7 +343,6 @@ pub fn start_sell_oracle(
                                 send_normal_tx(
                                     client.clone(),
                                     tx_data.clone(),
-                                    next_block.clone(),
                                     miner_tip,
                                     max_fee_per_gas
                                 ).await
@@ -433,8 +392,8 @@ async fn process_tx(
     let cache_db = match
         insert_pool_storage(
             client.clone(),
-            snipe_tx.pool.clone(),
-            latest_block_number.clone()
+            snipe_tx.pool,
+            latest_block_number
         ).await
     {
         Ok(cache_db) => cache_db,
@@ -453,7 +412,7 @@ async fn process_tx(
 
     // ** get the amount out in weth
     let amount_out_weth = match
-        simulate_sell(snipe_tx.pool.clone(), next_block.clone(), fork_factory.new_sandbox_fork())
+        simulate_sell(snipe_tx.pool, next_block.clone(), fork_factory.new_sandbox_fork())
     {
         Ok(result) => result,
         Err(e) => {
@@ -477,7 +436,7 @@ async fn process_tx(
         // ** generate tx_data
         let tx_data = match
             generate_sell_tx_data(
-                snipe_tx.pool.clone(),
+                snipe_tx.pool,
                 next_block.clone(),
                 fork_factory.new_sandbox_fork()
             )
@@ -520,7 +479,6 @@ async fn process_tx(
             send_normal_tx(
                 client.clone(),
                 tx_data.clone(),
-                next_block.clone(),
                 miner_tip,
                 max_fee_per_gas
             ).await

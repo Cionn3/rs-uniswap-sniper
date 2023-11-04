@@ -1,16 +1,15 @@
 use ethers::prelude::*;
-use crate::oracles::block_oracle::{ BlockOracle, NewBlockEvent, start_block_oracle };
-use crate::oracles::pair_oracle::{ start_pair_oracle, NewPairEvent };
-use crate::oracles::sell_oracle::{ SellOracle, push_tx_data_to_sell_oracle, start_sell_oracle };
+use crate::oracles::block_oracle::{ BlockOracle, start_block_oracle };
+use crate::oracles::pair_oracle::start_pair_oracle;
+use crate::oracles::sell_oracle::{ push_tx_data_to_sell_oracle, start_sell_oracle };
 use crate::oracles::anti_rug_oracle::{
     start_anti_rug,
     anti_honeypot,
-    AntiRugOracle,
     push_tx_data_to_antirug,
 };
-use crate::oracles::mempool_stream::{ start_mempool_stream, MemPoolEvent };
-use super::bot_runner::{ snipe_retry, RetryOracle };
-use super::bot_runner::{ start_sniper, NewSnipeTxEvent };
+use crate::oracles::mempool_stream::start_mempool_stream;
+use super::bot_runner::{snipe_retry, start_sniper};
+use crate::utils::types::{structs::*, events::*};
 use std::sync::Arc;
 use crate::utils::helpers::*;
 use tokio::sync::RwLock;
@@ -35,12 +34,10 @@ impl BotConfig {
         let block_oracle = BlockOracle::new(&client).await?;
         let block_oracle = Arc::new(RwLock::new(block_oracle));
 
-        // adjust these numbers as you like
-        // 0.025 weth
-        let initial_amount_in_weth = U256::from(25000000000000000u128);
 
-        // 0.10 weth x2 gains
-        let target_amount_to_sell = U256::from(100000000000000000u128);
+        let initial_amount_in_weth = *INITIAL_AMOUNT_IN_WETH;
+
+        let target_amount_to_sell = *TARGET_AMOUNT_TO_SELL;
 
         Ok(BotConfig {
             client,

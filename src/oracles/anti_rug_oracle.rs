@@ -1,7 +1,4 @@
 use tokio::sync::broadcast;
-use crate::bot::TxData;
-use crate::bot::bot_runner::NewSnipeTxEvent;
-use crate::oracles::mempool_stream::MemPoolEvent;
 
 use crate::utils::helpers::get_admin_address;
 use crate::utils::helpers::get_my_address;
@@ -9,7 +6,6 @@ use crate::utils::helpers::get_my_address;
 use ethers::prelude::*;
 use tokio::sync::Mutex;
 use std::sync::Arc;
-use crate::oracles::SellOracle;
 use revm::db::{ CacheDB, EmptyDB };
 use crate::utils::helpers::{
     create_local_client,
@@ -27,28 +23,10 @@ use crate::utils::simulate::simulate::{
 use crate::utils::simulate::insert_pool_storage;
 use crate::forked_db::fork_factory::ForkFactory;
 use crate::bot::bot_config::BotConfig;
-use crate::utils::simulate::SnipeTx;
+use crate::utils::types::{structs::*, events::*};
 
-use super::Pool;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct AntiRugOracle {
-    pub tx_data: Vec<SnipeTx>,
-}
 
-impl AntiRugOracle {
-    pub fn new() -> Self {
-        AntiRugOracle { tx_data: Vec::new() }
-    }
-
-    pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.push(tx_data);
-    }
-
-    pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.retain(|x| x != &tx_data);
-    }
-}
 
 // ** Pushes the new snipe tx data to the AntiRugOracle
 pub fn push_tx_data_to_antirug(
@@ -98,11 +76,11 @@ pub fn start_anti_rug(
                 // ** get the pools from the SnipeTx
                 let vec_pools = snipe_txs
                     .iter()
-                    .map(|x| x.pool.clone())
+                    .map(|x| x.pool)
                     .collect::<Vec<Pool>>();
 
                 // ** no pools yet in the oracle, skip
-                if vec_pools.len() == 0 {
+                if vec_pools.is_empty() {
                     continue;
                 }
 
@@ -173,7 +151,7 @@ pub fn start_anti_rug(
                         let next_block = next_block.clone();
                         let pending_tx = pending_tx.clone();
                         let empty_fork_db = empty_fork_db.clone();
-                        let latest_block_number = latest_block_number.clone();
+                        let latest_block_number = latest_block_number;
 
                         tokio::spawn(async move {
                             // ** First simulate a sell tx before the pending tx
@@ -185,7 +163,7 @@ pub fn start_anti_rug(
                                 insert_pool_storage(
                                     client.clone(),
                                     pool,
-                                    latest_block_number.clone()
+                                    latest_block_number
                                 ).await
                             {
                                 Ok(cache_db) => cache_db,
@@ -199,7 +177,7 @@ pub fn start_anti_rug(
                             let fork_factory = ForkFactory::new_sandbox_factory(
                                 client.clone(),
                                 cache_db,
-                                latest_block_number.clone()
+                                latest_block_number
                             );
 
                             let fork_db = fork_factory.new_sandbox_fork();
@@ -333,7 +311,6 @@ pub fn start_anti_rug(
                                     send_normal_tx(
                                         client.clone(),
                                         tx_data,
-                                        next_block.clone(),
                                         miner_tip,
                                         max_fee_per_gas
                                     ).await
@@ -418,11 +395,11 @@ pub fn anti_honeypot(
                 // ** get the pools from the SnipeTx
                 let vec_pools = snipe_txs
                     .iter()
-                    .map(|x| x.pool.clone())
+                    .map(|x| x.pool)
                     .collect::<Vec<Pool>>();
 
                 // ** no pools yet in the oracle, skip
-                if vec_pools.len() == 0 {
+                if vec_pools.is_empty() {
                     continue;
                 }
 
@@ -471,7 +448,7 @@ pub fn anti_honeypot(
                             insert_pool_storage(
                                 client.clone(),
                                 *touched_pool,
-                                latest_block_number.clone()
+                                latest_block_number
                             ).await
                         {
                             Ok(cache_db) => cache_db,
@@ -485,7 +462,7 @@ pub fn anti_honeypot(
                         let fork_factory = ForkFactory::new_sandbox_factory(
                             client.clone(),
                             cache_db,
-                            latest_block_number.clone()
+                            latest_block_number
                         );
                         let fork_db = fork_factory.new_sandbox_fork();
 
@@ -502,7 +479,7 @@ pub fn anti_honeypot(
                         // ** First simulate the sell tx before the pending tx
                         // ** here we use the backend with the populated db
                         let amount_out_before = match
-                            simulate_sell(touched_pool.clone(), next_block.clone(), fork_db.clone())
+                            simulate_sell(*touched_pool, next_block.clone(), fork_db.clone())
                         {
                             Ok(amount_out) => amount_out,
                             Err(e) => {
@@ -617,7 +594,6 @@ pub fn anti_honeypot(
                                 send_normal_tx(
                                     client.clone(),
                                     tx_data,
-                                    next_block.clone(),
                                     miner_tip,
                                     max_fee_per_gas
                                 ).await

@@ -2,44 +2,19 @@ use tokio::sync::broadcast::Sender;
 use ethers::prelude::*;
 use tokio::sync::broadcast;
 use crate::utils::helpers::{ create_local_client, convert_wei_to_ether, load_abi_from_file };
-use crate::oracles::mempool_stream::MemPoolEvent;
+use crate::utils::types::events::MemPoolEvent;
 use crate::utils::simulate::simulate::get_pair;
 use crate::bot::bot_config::BotConfig;
 use crate::forked_db::fork_factory::ForkFactory;
+use crate::utils::types::{structs::Pool, events::NewPairEvent};
 use revm::db::{ CacheDB, EmptyDB };
 
 const PAIR_CREATED_ABI: &str =
     "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"token0\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"token1\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"pair\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"\",\"type\":\"uint256\"}],\"name\":\"PairCreated\",\"type\":\"event\"}]";
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Pool {
-    pub address: Address,
-    pub token_0: Address,
-    pub token_1: Address,
-    pub weth_liquidity: U256,
-}
 
-impl Pool {
-    pub fn new(address: Address, token_a: Address, token_b: Address, weth_liquidity: U256) -> Pool {
-        let token_0 = token_a;
-        let token_1 = token_b;
 
-        Pool {
-            address,
-            token_0,
-            token_1,
-            weth_liquidity,
-        }
-    }
-}
 
-#[derive(Debug, Clone)]
-pub enum NewPairEvent {
-    NewPairWithTx {
-        pool: Pool,
-        tx: Transaction,
-    },
-}
 
 // Monitor pending txs for new pairs created
 pub fn start_pair_oracle(
@@ -124,7 +99,7 @@ pub fn start_pair_oracle(
                         get_pair(next_block, &tx, sync_event_abi, mint_event_abi, pair_created_event, fork_db)
                     {
                         Ok(address) => address,
-                        Err(e) => {
+                        Err(_e) => {
                             // log::error!(" {:?}", e);
                             return;
                         }

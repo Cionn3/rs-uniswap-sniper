@@ -6,9 +6,9 @@ pub use is_safu::*;
 
 pub mod access_list;
 pub use access_list::*;
-pub mod sim_fns;
 
 use ethers::prelude::*;
+use std::str::FromStr;
 use ethers::abi::parse_abi;
 use ethers::types::transaction::eip2930::AccessList;
 use revm::EVM;
@@ -16,11 +16,29 @@ use crate::forked_db::fork_db::ForkDB;
 use crate::oracles::block_oracle::BlockInfo;
 use revm::primitives::{ ExecutionResult, Output, TransactTo, AccountInfo };
 use revm::db::{ CacheDB, EmptyDB };
-use crate::utils::helpers::*;
+use crate::utils::{helpers::*, types::structs::Pool};
 use std::sync::Arc;
-use crate::oracles::pair_oracle::Pool;
 use revm::primitives::{ Address as rAddress, Bytecode, U256 as rU256 };
 use anyhow::anyhow;
+
+
+
+// Setup evm blockstate
+//
+// Arguments:
+// * `&mut evm`: mutable refernece to `EVM<ForkDB>` instance which we want to modify
+// * `&next_block`: reference to `BlockInfo` of next block to set values against
+//
+// Returns: This function returns nothing
+pub fn setup_block_state(evm: &mut EVM<ForkDB>, next_block: &BlockInfo) {
+    evm.env.block.number = rU256::from(next_block.number.as_u64());
+    evm.env.block.timestamp = next_block.timestamp.into();
+    evm.env.block.basefee = next_block.base_fee.into();
+    // use something other than default
+    evm.env.block.coinbase =
+        rAddress::from_str("0xDecafC0FFEe15BAD000000000000000000000000").unwrap();
+}
+
 
 // simulate a token call to the pool address
 // returns token0 and token1
@@ -168,6 +186,7 @@ pub fn get_balance_of_evm(
     }
 }
 
+// commits a pending tx
 fn commit_pending_tx(evm: &mut EVM<ForkDB>, tx: &Transaction) -> Result<(), anyhow::Error> {
     // disable checks
     evm.env.cfg.disable_base_fee = true;
@@ -204,6 +223,7 @@ fn commit_pending_tx(evm: &mut EVM<ForkDB>, tx: &Transaction) -> Result<(), anyh
     Ok(())
 }
 
+// commit our tx
 fn commit_tx(
     evm: &mut EVM<ForkDB>,
     call_data: Vec<u8>,
@@ -241,6 +261,7 @@ fn commit_tx(
     Ok(())
 }
 
+// commit tx with salmonella inspector
 fn commit_tx_with_inspector(
     evm: &mut EVM<ForkDB>,
     call_data: Vec<u8>,
@@ -306,7 +327,7 @@ fn commit_tx_with_access_list(
 
     // get access list
     let mut access_list_inspector = AccessListInspector::new(
-        get_my_address().into(),
+        get_my_address(),
         get_snipe_contract_address().0.into()
     );
 
@@ -324,7 +345,7 @@ fn commit_tx_with_access_list(
     let tx_result = match evm.transact_commit() {
         Ok(result) => result,
         Err(e) => {
-            return Err(anyhow!("Error when commiting Final Simulation: {:?}", e).into());
+            return Err(anyhow!("Error when commiting Final Simulation: {:?}", e));
         }
     };
 
@@ -333,6 +354,8 @@ fn commit_tx_with_access_list(
     Ok((convert_access_list(access_list), gas_used))
 }
 
+
+// inserts pool storage into cache db
 pub async fn insert_pool_storage(
     client: Arc<Provider<Ws>>,
     pool: Pool,
@@ -342,7 +365,7 @@ pub async fn insert_pool_storage(
 
     let slot_8 = rU256::from(8);
 
-    // fetch the acc info once for each pool
+    // fetch the acc info of pool
     let pool_acc_info = get_acc_info(client.clone(), pool.address, fork_block).await?;
 
     cache_db.insert_account_info(pool.address.into(), pool_acc_info);

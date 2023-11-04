@@ -4,13 +4,9 @@ use tokio::sync::broadcast::Sender;
 use ethers::prelude::*;
 use tokio::sync::RwLock;
 use colored::Colorize;
+use crate::utils::types::events::NewBlockEvent;
 
-#[derive(Debug, Clone)]
-pub enum NewBlockEvent {
-    NewBlock {
-        latest_block: BlockInfo,
-    },
-}
+
 
 #[derive(Debug, Clone, Default)]
 pub struct BlockInfo {
@@ -29,6 +25,7 @@ impl BlockInfo {
         }
     }
 
+    #[allow(dead_code)]
     // Find the next block ahead of `prev_block`
     pub fn find_next_block_info(prev_block: Block<TxHash>) -> Self {
         let number = prev_block.number.unwrap_or_default() + 1;
@@ -94,7 +91,7 @@ impl BlockOracle {
     // Updates block's timestamp
     pub fn update_block_timestamp(&mut self, timestamp: U256) {
         self.latest_block.timestamp = timestamp;
-        self.next_block.timestamp = timestamp + 3;
+        self.next_block.timestamp = timestamp + 12;
     }
 
     // Updates block's base fee

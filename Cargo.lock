@@ -3144,6 +3144,7 @@ dependencies = [
  "fern",
  "futures",
  "hashbrown 0.14.1",
+ "lazy_static",
  "log",
  "revm",
  "serde",

@@ -1,14 +1,10 @@
 use ethers::prelude::*;
 use tokio::sync::broadcast::Sender;
 
+use crate::utils::types::events::MemPoolEvent;
 use crate::utils::helpers::create_local_client;
 
-#[derive(Debug, Clone)]
-pub enum MemPoolEvent {
-    NewTx {
-        tx: Transaction,
-    },
-}
+
 
 pub fn start_mempool_stream(new_tx_sender: Sender<MemPoolEvent>) {
     tokio::spawn(async move {

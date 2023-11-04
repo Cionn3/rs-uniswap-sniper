@@ -5,44 +5,20 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use anyhow::anyhow;
 
-use crate::oracles::AntiRugOracle;
-use crate::oracles::SellOracle;
-use crate::oracles::pair_oracle::{ Pool, NewPairEvent };
-use crate::oracles::block_oracle::NewBlockEvent;
+
 use ethers::types::transaction::eip2930::AccessList;
 use crate::forked_db::fork_factory::ForkFactory;
 use crate::utils::simulate::insert_pool_storage;
-use crate::utils::simulate::simulate::{ tax_check, generate_buy_tx_data, transfer_check, SnipeTx };
+use crate::utils::simulate::simulate::{ tax_check, generate_buy_tx_data, transfer_check };
 use crate::utils::helpers::{ calculate_miner_tip, convert_wei_to_gwei, create_local_client };
 use super::send_tx::send_tx;
-use super::TxData;
+use crate::utils::types::{structs::*, events::*};
 use revm::db::{ CacheDB, EmptyDB };
 
 use super::bot_config::BotConfig;
 
-#[derive(Debug, Clone)]
-pub enum NewSnipeTxEvent {
-    SnipeTxData(SnipeTx),
-}
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct RetryOracle {
-    pub tx_data: Vec<SnipeTx>,
-}
 
-impl RetryOracle {
-    pub fn new() -> Self {
-        RetryOracle { tx_data: Vec::new() }
-    }
-
-    pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.push(tx_data);
-    }
-
-    pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.retain(|x| x != &tx_data);
-    }
-}
 
 pub fn start_sniper(
     bot_config: BotConfig,
@@ -92,7 +68,7 @@ async fn process_tx(
 ) -> Result<(), anyhow::Error> {
     let client = bot_config.client.clone();
     let block_oracle = bot_config.block_oracle.clone();
-    let amount_in = bot_config.initial_amount_in_weth.clone();
+    let amount_in = bot_config.initial_amount_in_weth;
 
     // get the next block
     let next_block = {
@@ -132,11 +108,12 @@ async fn process_tx(
     if !is_swap_success {
         // generate snipe_tx data
         let snipe_tx = SnipeTx {
-            pool: pool.clone(),
-            amount_in: amount_in.clone(),
+            pool: pool,
+            amount_in: amount_in,
+            target_amount_weth: bot_config.target_amount_to_sell,
             tx_call_data: Bytes::new(),
             access_list: AccessList::default(),
-            gas_used: (0u64).into(),
+            gas_used: (0u64),
             sniper_contract_address: Address::zero(),
             pending_tx: pending_tx.clone(),
             block_bought: next_block.number,
@@ -151,7 +128,7 @@ async fn process_tx(
     let _transfer_result = match
         transfer_check(
             &pool,
-            amount_in.clone(),
+            amount_in,
             &next_block,
             Some(pending_tx.clone()),
             fork_factory.new_sandbox_fork()
@@ -198,9 +175,9 @@ async fn process_tx(
     let tx_data = TxData {
         tx_call_data: snipe_tx.tx_call_data.clone(),
         access_list: snipe_tx.access_list.clone(),
-        gas_used: snipe_tx.gas_used.clone(),
+        gas_used: snipe_tx.gas_used,
         expected_amount,
-        sniper_contract_address: snipe_tx.sniper_contract_address.clone(),
+        sniper_contract_address: snipe_tx.sniper_contract_address,
         pending_tx: pending_tx.clone(),
         frontrun_or_backrun: U256::from(1u128), // 1 because we do backrun
     };
@@ -294,7 +271,7 @@ pub fn snipe_retry(
                 };
 
                 // ** if there are no txs in the oracle, skip
-                if snipe_txs.len() == 0 {
+                if snipe_txs.is_empty() {
                     continue;
                 }
 
@@ -333,7 +310,7 @@ pub fn snipe_retry(
                     }
 
                     let client = client.clone();
-                    let amount_in = bot_config.initial_amount_in_weth.clone();
+                    let amount_in = bot_config.initial_amount_in_weth;
                     let next_block = next_block.clone();
 
                     // initialize cache db
@@ -341,7 +318,7 @@ pub fn snipe_retry(
                         insert_pool_storage(
                             client.clone(),
                             tx.pool,
-                            latest_block_number.clone()
+                            latest_block_number
                         ).await
                     {
                         Ok(cache_db) => cache_db,
@@ -363,7 +340,7 @@ pub fn snipe_retry(
                         let swap = match
                             tax_check(
                                 &tx.pool,
-                                amount_in.clone(),
+                                amount_in,
                                 &next_block,
                                 None,
                                 fork_factory.new_sandbox_fork()
@@ -387,7 +364,7 @@ pub fn snipe_retry(
                         let _transfer_result = match
                             transfer_check(
                                 &tx.pool,
-                                amount_in.clone(),
+                                amount_in,
                                 &next_block,
                                 None,
                                 fork_factory.new_sandbox_fork()
@@ -405,7 +382,7 @@ pub fn snipe_retry(
                         let snipe_tx = match
                         generate_buy_tx_data(
                                 &tx.pool,
-                                amount_in.clone(),
+                                amount_in,
                                 &next_block,
                                 None,
                                 fork_factory.new_sandbox_fork()
@@ -432,9 +409,9 @@ pub fn snipe_retry(
                         let tx_data = TxData {
                             tx_call_data: snipe_tx.tx_call_data.clone(),
                             access_list: snipe_tx.access_list.clone(),
-                            gas_used: snipe_tx.gas_used.clone(),
+                            gas_used: snipe_tx.gas_used,
                             expected_amount,
-                            sniper_contract_address: snipe_tx.sniper_contract_address.clone(),
+                            sniper_contract_address: snipe_tx.sniper_contract_address,
                             pending_tx: snipe_tx.pending_tx.clone(),
                             frontrun_or_backrun: U256::from(2u128), // 2 cause we dont backrun or frontrun
                         };

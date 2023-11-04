@@ -1,19 +1,30 @@
 use std::sync::Arc;
 use std::str::FromStr;
-use ethers::{prelude::*, types::transaction::eip2718::TypedTransaction};
-use ethers::types::transaction::eip2930::{AccessList, AccessListItem};
-use revm::primitives::{U256 as rU256, B160 as rAddress};
+use ethers::{ prelude::*, types::transaction::eip2718::TypedTransaction };
+use ethers::types::transaction::eip2930::{ AccessList, AccessListItem };
+use revm::primitives::{ U256 as rU256, B160 as rAddress };
 use bigdecimal::BigDecimal;
 use std::fs;
+use sha3::{ Digest, Keccak256 };
+use lazy_static::lazy_static;
 
+lazy_static! {
+    pub static ref WETH: Address = get_weth_address();
 
+    // change these numbers as you like
+    // 0.025 eth
+    pub static ref INITIAL_AMOUNT_IN_WETH: U256 = U256::from(25000000000000000u128);
 
-pub  fn get_my_address() -> Address {
+    // 0.125 eth = 5x
+    pub static ref TARGET_AMOUNT_TO_SELL: U256 = U256::from(125000000000000000u128);
+}
+
+pub fn get_my_address() -> Address {
     Address::from_str("0xyouraddress").unwrap()
 }
 
 // address to withdraw funds to
-pub  fn get_admin_address() -> Address {
+pub fn get_admin_address() -> Address {
     Address::from_str("0xyouraddress").unwrap()
 }
 
@@ -23,12 +34,10 @@ pub fn get_weth_address() -> Address {
 
 // wallet used to sign the trasnactions and call the contract
 // fill in your private key here
-pub  fn get_my_wallet() -> LocalWallet {
-    let private_key: String = ("0xprivatekey").parse().expect("private key wrong format?");
+pub fn get_my_wallet() -> LocalWallet {
+    let private_key: String = "0xprivatekey".parse().expect("private key wrong format?");
     private_key.parse::<LocalWallet>().expect("Failed to parse private key")
 }
-
-
 
 pub fn get_flashbot_identity() -> LocalWallet {
     let private_key: String = get_flashbots_auth_key();
@@ -50,7 +59,7 @@ pub fn get_flashbots_searcher_key() -> String {
     "0xprivatekey".to_string()
 }
 
-pub  fn get_snipe_contract_address() -> Address {
+pub fn get_snipe_contract_address() -> Address {
     Address::from_str("0xyourcontracttaddress").unwrap()
 }
 
@@ -68,7 +77,7 @@ pub async fn get_local_client() -> Result<Provider<Ws>, anyhow::Error> {
 
 pub async fn get_nonce(
     client: Arc<Provider<Ws>>,
-    address: Address,
+    address: Address
 ) -> Result<Option<u64>, ProviderError> {
     client.get_transaction_count(address, None).await.map(|nonce| Some(nonce.as_u64()))
 }
@@ -85,30 +94,28 @@ pub fn convert_wei_to_gwei(wei: U256) -> BigDecimal {
     wei_as_decimal / divisor
 }
 
-
 // Load ABI from a file
 pub fn load_abi_from_file(file_path: &str) -> Result<String, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(file_path)?;
     Ok(content)
 }
 
-
-
 /// Sign eip1559 transactions
 pub async fn sign_eip1559(
     tx: Eip1559TransactionRequest,
-    signer_wallet: &LocalWallet,
+    signer_wallet: &LocalWallet
 ) -> Result<Bytes, WalletError> {
     let tx_typed = TypedTransaction::Eip1559(tx);
     //log::info!("Signing transaction: {:?}", tx_typed);
     let signed_frontrun_tx_sig = match signer_wallet.sign_transaction(&tx_typed).await {
         Ok(s) => s,
-        Err(e) => return Err(e),
+        Err(e) => {
+            return Err(e);
+        }
     };
 
     Ok(tx_typed.rlp_signed(&signed_frontrun_tx_sig))
 }
-
 
 // Converts access list from revm to ethers type
 //
@@ -139,53 +146,100 @@ pub fn convert_access_list(access_list: Vec<(rAddress, Vec<rU256>)>) -> AccessLi
     AccessList(converted_access_list)
 }
 
-pub fn calculate_miner_tip(
-    pending_tx_priority_fee: U256,
-) -> U256 {
-
+pub fn calculate_miner_tip(pending_tx_priority_fee: U256) -> U256 {
     let point_one_gwei = U256::from(100000000u128); // 0.1 gwei
     let point_five_gwei = U256::from(500000000u128); // 0.5 gwei
     let one_gwei = U256::from(1000000000u128); // 1 gwei
     let two_gwei = U256::from(2000000000u128); // 2 gwei
-    let three_gwei = U256::from(3000000000u128); // 3 
+    let three_gwei = U256::from(3000000000u128); // 3
     let ten_gwei = U256::from(10000000000u128); // 10 gwei
-   
-    
+
     let miner_tip;
-    
 
-        // match pending_tx_priorite_fee to the different lvls we set
-        match pending_tx_priority_fee {
-            // if pending fee is 0
-            fee if fee == (0).into() => {
-                miner_tip = ten_gwei; // 10 gwei
-            }
-            // if pending fee is between  0 ish and 0.1 gwei
-            fee if fee < point_one_gwei => {
-                miner_tip = fee * 100; // maximum 10 gwei
-            }
-            // if pending fee is between 0.1 and 1 gwei
-            fee if fee > point_one_gwei && fee < point_five_gwei => {
-                miner_tip = fee * 25; // maximum 10 gwei
-            }
-            // if fee is between 0.5 and 1 gwei
-            fee if fee > point_five_gwei && fee < one_gwei => {
-                miner_tip = fee * 15; // maximum 15 gwei
-            }
-            // if pending fee is between 1 and 3 gwei
-            fee if fee > one_gwei && fee < two_gwei => {
-                miner_tip = fee * 7; // maximum 21 gwei
-            }
-            // if fee is between 2 and 3 gwei
-            fee if fee > two_gwei && fee < three_gwei => {
-                miner_tip = fee * 5; // maximum 15 gwei
-            }
-            // for anything else
-            _ => {
-                miner_tip = (pending_tx_priority_fee * 15) / 10; // +50%
-                
-            }
+    // match pending_tx_priorite_fee to the different lvls we set
+    match pending_tx_priority_fee {
+        // if pending fee is 0
+        fee if fee == (0).into() => {
+            miner_tip = ten_gwei; // 10 gwei
         }
+        // if pending fee is between  0 ish and 0.1 gwei
+        fee if fee < point_one_gwei => {
+            miner_tip = fee * 100; // maximum 10 gwei
+        }
+        // if pending fee is between 0.1 and 1 gwei
+        fee if fee > point_one_gwei && fee < point_five_gwei => {
+            miner_tip = fee * 25; // maximum 10 gwei
+        }
+        // if fee is between 0.5 and 1 gwei
+        fee if fee > point_five_gwei && fee < one_gwei => {
+            miner_tip = fee * 15; // maximum 15 gwei
+        }
+        // if pending fee is between 1 and 3 gwei
+        fee if fee > one_gwei && fee < two_gwei => {
+            miner_tip = fee * 7; // maximum 21 gwei
+        }
+        // if fee is between 2 and 3 gwei
+        fee if fee > two_gwei && fee < three_gwei => {
+            miner_tip = fee * 5; // maximum 15 gwei
+        }
+        // for anything else
+        _ => {
+            miner_tip = (pending_tx_priority_fee * 15) / 10; // +50%
+        }
+    }
 
-        miner_tip
+    miner_tip
+}
+
+pub fn encode_swap(
+    input_token: Address,
+    output_token: Address,
+    pool_address: Address,
+    amount_in: U256,
+    expected_amount: U256
+) -> Vec<u8> {
+    // The method's signature hash (first 4 bytes of the keccak256 hash of the signature).
+    let method_id = &keccak256(b"snipaaaaaa(address,address,address,uint256,uint256)")[0..4];
+
+    // ABI-encode the arguments
+    let encoded_args = ethabi::encode(
+        &[
+            ethabi::Token::Address(input_token),
+            ethabi::Token::Address(output_token),
+            ethabi::Token::Address(pool_address),
+            ethabi::Token::Uint(amount_in),
+            ethabi::Token::Uint(expected_amount),
+        ]
+    );
+
+    let mut payload = vec![];
+    payload.extend_from_slice(method_id);
+    payload.extend_from_slice(&encoded_args);
+
+    payload
+}
+
+pub fn create_withdraw_data(input_token: Address, amount_in: U256) -> Vec<u8> {
+    // The method's signature hash (first 4 bytes of the keccak256 hash of the signature).
+    let method_id = &keccak256(b"withdraw(address,uint256)")[0..4];
+
+    // ABI-encode the arguments
+    let encoded_args = ethabi::encode(
+        &[ethabi::Token::Address(input_token), ethabi::Token::Uint(amount_in)]
+    );
+
+    let mut payload = vec![];
+    payload.extend_from_slice(method_id);
+    payload.extend_from_slice(&encoded_args);
+
+    payload
+}
+
+pub fn keccak256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&result);
+    output
 }

@@ -1,14 +1,12 @@
 use std::sync::Arc;
 use ethers::prelude::*;
 use crate::utils::helpers::sign_eip1559;
-use crate::oracles::block_oracle::BlockInfo;
-use crate::bot::TxData;
+use crate::utils::types::structs::TxData;
 use crate::utils::helpers::{ get_my_address, get_my_wallet, get_nonce };
 
 pub async fn send_normal_tx(
     client: Arc<Provider<Ws>>,
     tx_data: TxData,
-    next_block: BlockInfo,
     miner_tip: U256,
     max_fee_per_gas: U256
 ) -> Result<bool, anyhow::Error> {
@@ -34,7 +32,7 @@ pub async fn send_normal_tx(
         chain_id: Some(U64::from(1)),
         max_priority_fee_per_gas: Some(miner_tip),
         max_fee_per_gas: Some(max_fee_per_gas),
-        gas: Some(U256::from(gas_limit)),
+        gas: Some(gas_limit),
         nonce: nonce,
         value: Some(U256::zero()),
         access_list: tx_data.access_list.clone(),

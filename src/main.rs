@@ -35,7 +35,7 @@ fern::Dispatch::new()
     .chain(fern::log_file("output.log")?)
     // hide all logs for everything other than bot
     .level(log::LevelFilter::Error)
-    .level_for("rs-uniswap-sniper", log::LevelFilter::Info)
+    .level_for("rs_uniswap_sniper", log::LevelFilter::Info)
     .apply()?;
 
     let client = create_local_client().await?;
