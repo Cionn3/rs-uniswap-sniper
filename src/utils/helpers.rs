@@ -12,13 +12,43 @@ lazy_static! {
     pub static ref WETH: Address = get_weth_address();
 
     // change these numbers as you like
-    // 0.025 eth
-    pub static ref INITIAL_AMOUNT_IN_WETH: U256 = U256::from(25000000000000000u128);
 
-    // 0.125 eth = 5x
-    pub static ref TARGET_AMOUNT_TO_SELL: U256 = U256::from(125000000000000000u128);
+    // amount of eth to use for the snipe
+    // 0.01 eth
+    pub static ref INITIAL_AMOUNT_IN_WETH: U256 = U256::from(10000000000000000u128);
+
+    // amount of eth to get from the trade
+    // 0.05 eth = 5x
+    pub static ref TARGET_AMOUNT_TO_SELL: U256 = U256::from(50000000000000000u128);
+
+    // miner tip to use for the snipe
+    // 10 gwei
+    pub static ref MINER_TIP_TO_SNIPE: U256 = U256::from(10000000000u128); 
+
+    // miner tip to use when we retry to snipe
+    // 3 gwei
+    pub static ref MINER_TIP_TO_SNIPE_RETRY: U256 = U256::from(3000000000u128); 
+
+    // miner tip to use when we sell
+    // 3 gwei
+    pub static ref MINER_TIP_TO_SELL: U256 = U256::from(3000000000u128);
+
+    // how many times we try to sell before we remove the token from the sell oracle
+    pub static ref MAX_SELL_ATTEMPTS: u8 = 5;
+
+    // how many times we retry to buy a token before we remove it from the retry oracle
+    pub static ref MAX_SNIPE_RETRIES: u8 = 10; 
+
+    // minimum weth reserve for a new pair
+    // default is 1 eth
+    pub static ref MIN_WETH_RESERVE: U256 = U256::from(1000000000000000000u128);
+
+    // maximum weth reserve for a new pair
+    // default is 7 eth
+    pub static ref MAX_WETH_RESERVE: U256 = U256::from(7000000000000000000u128);
 }
 
+// address to call contract from (SWAP_USER)
 pub fn get_my_address() -> Address {
     Address::from_str("0xyouraddress").unwrap()
 }
@@ -26,6 +56,11 @@ pub fn get_my_address() -> Address {
 // address to withdraw funds to
 pub fn get_admin_address() -> Address {
     Address::from_str("0xyouraddress").unwrap()
+}
+
+// your contract address goes here
+pub fn get_snipe_contract_address() -> Address {
+    Address::from_str("0xyourcontracttaddress").unwrap()
 }
 
 pub fn get_weth_address() -> Address {
@@ -59,9 +94,7 @@ pub fn get_flashbots_searcher_key() -> String {
     "0xprivatekey".to_string()
 }
 
-pub fn get_snipe_contract_address() -> Address {
-    Address::from_str("0xyourcontracttaddress").unwrap()
-}
+
 
 /// Create Websocket Client
 pub async fn create_local_client() -> Result<Arc<Provider<Ws>>, anyhow::Error> {

@@ -1,11 +1,5 @@
 use ethers::prelude::*;
-use revm::primitives::{
-    ExecutionResult,
-    Output,
-    TransactTo,
-    U256 as rU256,
-    B160 as rAddress,
-};
+use revm::primitives::{ ExecutionResult, Output, TransactTo, U256 as rU256, B160 as rAddress };
 use anyhow::anyhow;
 use super::*;
 use crate::forked_db::fork_db::ForkDB;
@@ -14,8 +8,6 @@ use crate::utils::helpers::*;
 use ethers::abi::Tokenizable;
 use ethabi::{ RawLog, Event };
 use crate::utils::types::structs::*;
-
-
 
 // Checks if the token has taxes
 // we use a resonable amount of weth cause of the price impact
@@ -57,7 +49,13 @@ pub fn tax_check(
     // ** We do a buy/sell on the same block **
     // ** We could skip Salmonela Inspector **
 
-    let is_buy_reverted = commit_tx_with_inspector(&mut evm, call_data, next_block, &pool.token_1)?;
+    let is_buy_reverted = commit_tx_with_inspector(
+        &mut evm,
+        call_data,
+        next_block,
+        &pool.token_1,
+        get_my_address() // caller
+    )?;
 
     // ** Do the sell Transaction **
 
@@ -82,7 +80,8 @@ pub fn tax_check(
         &mut evm,
         call_data,
         next_block,
-        &pool.token_1
+        &pool.token_1,
+        get_my_address() // caller
     )?;
 
     // get the post balance of weth
@@ -93,15 +92,21 @@ pub fn tax_check(
         &mut evm
     )?;
 
-    if is_buy_reverted || is_sell_reverted {
-        log::error!("Buy or sell reverted");
+    if is_buy_reverted {
+        log::warn!("Buy reverted {:?}", pool.token_1);
         return Ok(false);
     }
 
-    // Check if the final WETH amount is less than 90% of the expected amount
-    if final_amount_weth < (amount_in_weth * 9) / 10 {
+    if is_sell_reverted {
+        log::error!("Sell reverted {:?}", pool.token_1);
+        return Ok(false);
+    }
+
+    // Check if the final WETH amount is less than 80% of the expected amount
+    // change this as you like
+    if final_amount_weth < (amount_in_weth * 8) / 10 {
         return Err(
-            anyhow!("Skipped Token, we lost more than 10% in a buy/sell: {:?}", final_amount_weth)
+            anyhow!("Skipped Token, we lost more than 20% in a buy/sell: {:?}", pool.token_1)
         );
     }
 
@@ -135,7 +140,13 @@ pub fn tax_check(
     );
 
     // ** simulate the buy swap
-    let is_buy_reverted = commit_tx_with_inspector(&mut evm, call_data, next_block, &pool.token_1)?;
+    let is_buy_reverted = commit_tx_with_inspector(
+        &mut evm,
+        call_data,
+        next_block,
+        &pool.token_1,
+        get_my_address() // caller
+    )?;
 
     // ** Do the sell Transaction **
 
@@ -164,7 +175,8 @@ pub fn tax_check(
         &mut evm,
         call_data,
         next_block,
-        &pool.token_1
+        &pool.token_1,
+        get_my_address() // caller
     )?;
 
     // get the post balance of weth
@@ -175,17 +187,22 @@ pub fn tax_check(
         &mut evm
     )?;
 
-    if is_buy_reverted || is_sell_reverted {
-        log::error!("Buy or sell reverted after 200 blocks");
+    if is_buy_reverted {
+        log::error!("Buy reverted after 200 blocks {:?}", pool.token_1);
         return Ok(false);
     }
 
-    // Check if the final WETH amount is less than 90% of the expected amount
-    if final_amount_weth < (amount_in_weth * 9) / 10 {
+    if is_sell_reverted {
+        log::error!("Sell reverted after 200 blocks {:?}", pool.token_1);
+        return Ok(false);
+    }
+
+    // Check if the final WETH amount is less than 80% of the expected amount
+    if final_amount_weth < (amount_in_weth * 8) / 10 {
         return Err(
             anyhow!(
-                "Skipped Token after 200 blocks, we lost more than 10% in a buy/sell: {:?}",
-                final_amount_weth
+                "Skipped Token after 200 blocks, we lost more than 20% in a buy/sell: {:?}",
+                pool.token_1
             )
         );
     }
@@ -225,7 +242,13 @@ pub fn transfer_check(
         U256::from(0u128)
     );
 
-    let _commit_tx = commit_tx_with_inspector(&mut evm, call_data, next_block, &pool.token_1)?;
+    let _commit_tx = commit_tx_with_inspector(
+        &mut evm,
+        call_data,
+        next_block,
+        &pool.token_1,
+        get_my_address() // caller
+    )?;
 
     // ** Do Tranfer Check **
     //** A lot of honeypots tokens dont allow you to transfer the token at all
@@ -248,7 +271,13 @@ pub fn transfer_check(
         amount_in_token
     );
 
-    let _withdraw = commit_tx_with_inspector(&mut evm, call_data, next_block, &pool.token_1)?;
+    let _withdraw = commit_tx_with_inspector(
+        &mut evm,
+        call_data,
+        next_block,
+        &pool.token_1,
+        get_admin_address() // caller
+    )?;
 
     // get the post balance of admin (the address we sent the tokens)
     let amount_token_in_admin = get_balance_of_evm(
@@ -258,9 +287,9 @@ pub fn transfer_check(
         &mut evm
     )?;
 
-    //** check if we lost more than 10% on the transfer */
-    if amount_token_in_admin < (amount_in_token * 9) / 10 {
-        return Err(anyhow!("We lost more than 10% on the transfer"));
+    //** check if we lost more than 20% on the transfer */
+    if amount_token_in_admin < (amount_in_token * 8) / 10 {
+        return Err(anyhow!("We lost more than 20% on the transfer"));
     }
 
     Ok(())
@@ -279,11 +308,10 @@ pub fn generate_buy_tx_data(
     // setup the next block state
     setup_block_state(&mut evm, next_block);
 
-
     if let Some(ref tx) = pending_tx {
         // first simulate and commit the pending tx so we can buy the token
         commit_pending_tx(&mut evm, tx)?;
-    };
+    }
 
     // enable checks
     evm.env.cfg.disable_base_fee = false;
@@ -303,13 +331,12 @@ pub fn generate_buy_tx_data(
     let (access_list, gas_used) = commit_tx_with_access_list(&mut evm, call_data, next_block)?;
 
     // get the balance of the token we bought
-    let token_balance = 
-        get_balance_of_evm(
-            pool.token_1, // shitcoin
-            get_snipe_contract_address(),
-            next_block,
-            &mut evm
-        )?;
+    let token_balance = get_balance_of_evm(
+        pool.token_1, // shitcoin
+        get_snipe_contract_address(),
+        next_block,
+        &mut evm
+    )?;
 
     // 10% tolerance/slippage
     // adjust this as you like
@@ -336,7 +363,10 @@ pub fn generate_buy_tx_data(
             amount_in_weth,
             *TARGET_AMOUNT_TO_SELL,
             next_block.number,
-            Some(tx.clone())
+            Some(tx.clone()),
+            0, // zero attempts to sell
+            0, // zero snipe retries
+            false // pending tx is false
         )
     )
 }
@@ -353,22 +383,20 @@ pub fn simulate_sell(
     setup_block_state(&mut evm, &next_block);
 
     // ** get the token balance for the amount_in to sell
-    let amount_in =
-        get_balance_of_evm(
-            pool.token_1, // token1 is always a shitcoin
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let amount_in = get_balance_of_evm(
+        pool.token_1, // token1 is always a shitcoin
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // ** Get The initial WETH Balance
-    let before_balance =
-        get_balance_of_evm(
-            pool.token_0, // weth
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let before_balance = get_balance_of_evm(
+        pool.token_0, // weth
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
@@ -383,13 +411,12 @@ pub fn simulate_sell(
     let _commit_tx = commit_tx(&mut evm, call_data, &next_block)?;
 
     // get the post balance of weth
-    let post_balance_weth =
-        get_balance_of_evm(
-            pool.token_0, // weth
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let post_balance_weth = get_balance_of_evm(
+        pool.token_0, // weth
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // calculate the final amount of weth
     let final_amount_weth = post_balance_weth.checked_sub(before_balance).unwrap_or_default();
@@ -423,26 +450,24 @@ pub fn simulate_sell_after(
     // ** Now Simulate The Sell Transaction
 
     // ** get the token balance for the amount_in to sell
-    let amount_in = 
-        get_balance_of_evm(
-            pool.token_1, // token1 is always a shitcoin
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let amount_in = get_balance_of_evm(
+        pool.token_1, // token1 is always a shitcoin
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     if amount_in == U256::zero() {
         log::error!("Anti-Honeypot ERROR contract doesnt have any balance for {:?}", pool.token_1);
     }
 
     // ** Get The initial WETH Balance
-    let before_balance = 
-        get_balance_of_evm(
-            pool.token_0, // weth
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let before_balance = get_balance_of_evm(
+        pool.token_0, // weth
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
@@ -494,13 +519,12 @@ pub fn simulate_sell_after(
     };
 
     // get the post balance of weth
-    let post_balance_weth = 
-        get_balance_of_evm(
-            pool.token_0, // weth
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let post_balance_weth = get_balance_of_evm(
+        pool.token_0, // weth
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // calculate the final amount of weth
     let final_amount_weth = post_balance_weth.checked_sub(before_balance).unwrap_or_default();
@@ -534,22 +558,20 @@ pub fn generate_sell_tx_data(
 
     // ** get the token balance for the amount_in to sell
 
-    let amount_in = 
-        get_balance_of_evm(
-            pool.token_1, // token1 is always a shitcoin
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let amount_in = get_balance_of_evm(
+        pool.token_1, // token1 is always a shitcoin
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // ** Get The initial WETH Balance
-    let before_balance = 
-        get_balance_of_evm(
-            pool.token_0, // weth
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let before_balance = get_balance_of_evm(
+        pool.token_0, // weth
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
@@ -561,16 +583,19 @@ pub fn generate_sell_tx_data(
     );
 
     // commit tx
-    let (access_list, gas_used) = commit_tx_with_access_list(&mut evm, call_data.clone(), &next_block)?;
+    let (access_list, gas_used) = commit_tx_with_access_list(
+        &mut evm,
+        call_data.clone(),
+        &next_block
+    )?;
 
     // get the post balance of weth
-    let post_balance_weth = 
-        get_balance_of_evm(
-            pool.token_0, // weth
-            get_snipe_contract_address(),
-            &next_block,
-            &mut evm
-        )?;
+    let post_balance_weth = get_balance_of_evm(
+        pool.token_0, // weth
+        get_snipe_contract_address(),
+        &next_block,
+        &mut evm
+    )?;
 
     // calculate the final amount of weth
     let expected_amount = post_balance_weth.checked_sub(before_balance).unwrap_or_default();
@@ -606,7 +631,6 @@ pub fn get_touched_pools(
     evm.env.cfg.disable_base_fee = true;
     evm.env.cfg.disable_block_gas_limit = true;
     evm.env.cfg.disable_balance_check = true;
-
 
     // simulate the pending tx
     evm.env.tx.caller = rAddress::from_slice(&tx.from.0);

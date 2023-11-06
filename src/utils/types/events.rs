@@ -3,12 +3,6 @@ use crate::oracles::block_oracle::BlockInfo;
 use ethers::types::Transaction;
 
 
-// When we snipe a new token
-#[derive(Debug, Clone)]
-pub enum NewSnipeTxEvent {
-    SnipeTxData(SnipeTx),
-}
-
 
 // New block event from the block oracle
 #[derive(Debug, Clone)]

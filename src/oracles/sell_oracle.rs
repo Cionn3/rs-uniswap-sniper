@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 
-use crate::utils::helpers::{ create_local_client, convert_wei_to_ether };
+use crate::utils::helpers::{ create_local_client, convert_wei_to_ether, MINER_TIP_TO_SELL, MAX_SELL_ATTEMPTS };
 
 use crate::bot::send_normal_tx::send_normal_tx;
 
@@ -12,27 +12,13 @@ use crate::utils::simulate::simulate::{ simulate_sell, generate_sell_tx_data };
 use crate::utils::simulate::insert_pool_storage;
 use crate::bot::bot_config::BotConfig;
 use crate::forked_db::fork_factory::ForkFactory;
-use crate::utils::types::{structs::{SnipeTx, SellOracle, AntiRugOracle}, events::{NewSnipeTxEvent, NewBlockEvent}};
+use crate::utils::types::{
+    structs::{ SnipeTx, SellOracle, AntiRugOracle },
+    events::NewBlockEvent,
+};
 use anyhow::anyhow;
 
 
-
-// ** Pushes the new snipe tx data to the SellOracle
-pub fn push_tx_data_to_sell_oracle(
-    shared_oracle: Arc<Mutex<SellOracle>>,
-    mut new_snipe_event_receiver: broadcast::Receiver<NewSnipeTxEvent>
-) {
-    tokio::spawn(async move {
-        while let Ok(snipe_event) = new_snipe_event_receiver.recv().await {
-            let snipe_event = match snipe_event {
-                NewSnipeTxEvent::SnipeTxData(snipe_event) => snipe_event,
-            };
-
-            let mut oracle = shared_oracle.lock().await;
-            oracle.add_tx_data(snipe_event);
-        }
-    });
-}
 
 // ** Running swap simulations on every block to keep track of the selling price
 pub fn start_sell_oracle(
@@ -57,10 +43,12 @@ pub fn start_sell_oracle(
                 let latest_block = match event {
                     NewBlockEvent::NewBlock { latest_block } => latest_block,
                 };
-
+                
                 // ** Get the snipe tx data from the oracle
-                let oracle = shared_oracle.lock().await;
-                let snipe_txs = &oracle.tx_data;
+                let snipe_txs = {
+                    let oracle = shared_oracle.lock().await;
+                    oracle.tx_data.clone()
+                };
 
                 // ** if there are no txs in the oracle, continue
                 if snipe_txs.is_empty() {
@@ -77,7 +65,7 @@ pub fn start_sell_oracle(
                     block_oracle.next_block.clone()
                 };
 
-                log::info!("Latest Block From Sell Oracle: {:?}", latest_block.number);
+
                 let latest_block_number = Some(
                     BlockId::Number(BlockNumber::Number(latest_block.number))
                 );
@@ -86,7 +74,19 @@ pub fn start_sell_oracle(
                     let shared_oracle_clone = shared_oracle.clone();
                     let anti_rug_oracle = anti_rug_oracle.clone();
 
-                    let tx = tx.clone();
+
+                    // if we reached the retry limit remove tx from oracles
+                    if tx.attempts_to_sell >= *MAX_SELL_ATTEMPTS {
+                        let mut oracle_guard = shared_oracle_clone.lock().await;
+                        oracle_guard.remove_tx_data(tx.clone());
+                        drop(oracle_guard);
+                        let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+                        anti_rug_oracle_guard.remove_tx_data(tx.clone());
+                        drop(anti_rug_oracle_guard);
+                        log::warn!("Sell Oracle: Retries >= 5, Removed tx from oracles");
+                        continue;
+                    }
+
                     let client = client.clone();
 
                     // ** The pool of the token we are selling
@@ -114,8 +114,7 @@ pub fn start_sell_oracle(
                         let is_5_min_passed = blocks_passed == (25u64).into();
                         let is_10_min_passed = blocks_passed == (50u64).into();
                         let is_20_min_passed = blocks_passed == (100u64).into();
-                        // let between_1_to_5_min =
-                        //   blocks_passed >= (5u64).into() && blocks_passed <= (25u64).into();
+                        
 
                         // if 2 mins have passed check the price
                         if is_2_min_passed {
@@ -234,11 +233,7 @@ pub fn start_sell_oracle(
 
                         // ** initialize cache db and insert pool storage
                         let cache_db = match
-                            insert_pool_storage(
-                                client.clone(),
-                                pool,
-                                latest_block_number
-                            ).await
+                            insert_pool_storage(client.clone(), pool, latest_block_number).await
                         {
                             Ok(cache_db) => cache_db,
                             Err(e) => {
@@ -261,18 +256,15 @@ pub fn start_sell_oracle(
                             Ok(result) => result,
                             Err(e) => {
                                 log::error!(
-                                    "Failed to simulate sell for token: {:?} Error: {:?}",
+                                    "Failed to sell token: {:?} Error: {:?}",
                                     pool.token_1,
                                     e
                                 );
                                 // ** if we get an error here GG
-                                // ** remove the tx from the oracles
-                                let mut oracle = shared_oracle_clone.lock().await;
-                                oracle.remove_tx_data(tx.clone());
-                                let mut anti_rug_oracle = anti_rug_oracle.lock().await;
-                                anti_rug_oracle.remove_tx_data(tx.clone());
-                                log::warn!("We got Rugged, Removed tx from oracles");
-
+                                // ** add plus 1 to the retries
+                                let mut oracle_guard = shared_oracle_clone.lock().await;
+                                oracle_guard.update_attempts_to_sell(tx.clone());
+                                drop(oracle_guard);
                                 return;
                             }
                         };
@@ -282,13 +274,14 @@ pub fn start_sell_oracle(
                         // to do this check only once we check if current_block is equal to block_bought
 
                         if latest_block.number == tx.block_bought {
-                            // If the amount_out is less than 80% of the initial amount in, we probably got a bad position
-                            if amount_out_weth < (initial_amount_in * 8) / 10 {
+                            // If the amount_out is less than 70% of the initial amount in, we probably got a bad position
+                            if amount_out_weth < (initial_amount_in * 7) / 10 {
                                 // set the target_amount_weth to 1.5x
                                 target_amount_weth = (initial_amount_in * 15) / 10;
                                 // update the target_amount_weth in the oracle
-                                let mut oracle = shared_oracle_clone.lock().await;
-                                oracle.update_target_amount(tx.clone(), target_amount_weth);
+                                let mut oracle_guard = shared_oracle_clone.lock().await;
+                                oracle_guard.update_target_amount(tx.clone(), target_amount_weth);
+                                drop(oracle_guard);
                                 log::warn!("Got a bad position, changed target amount to 1.5x");
                             } else {
                                 log::info!("Position is good");
@@ -331,7 +324,7 @@ pub fn start_sell_oracle(
                             };
 
                             // ** miner tip
-                            let miner_tip = U256::from(10000000000u128); // 10 gwei
+                            let miner_tip = *MINER_TIP_TO_SELL;
 
                             // ** max fee per gas must always be higher than miner tip
                             let max_fee_per_gas = next_block.base_fee + miner_tip;
@@ -361,10 +354,12 @@ pub fn start_sell_oracle(
                                     final_amount_weth_converted
                                 );
                                 // ** remove the tx from the oracles
-                                let mut oracle = shared_oracle_clone.lock().await;
-                                oracle.remove_tx_data(tx.clone());
-                                let mut anti_rug_oracle = anti_rug_oracle.lock().await;
-                                anti_rug_oracle.remove_tx_data(tx.clone());
+                                let mut oracle_guard = shared_oracle_clone.lock().await;
+                                oracle_guard.remove_tx_data(tx.clone());
+                                drop(oracle_guard);
+                                let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+                                anti_rug_oracle_guard.remove_tx_data(tx.clone());
+                                drop(anti_rug_oracle_guard);
                             } else {
                                 log::error!(
                                     "Bundle not included, will try again in the next block"
@@ -390,11 +385,7 @@ async fn process_tx(
 ) -> Result<(), anyhow::Error> {
     // ** initialize cache db and insert pool storage
     let cache_db = match
-        insert_pool_storage(
-            client.clone(),
-            snipe_tx.pool,
-            latest_block_number
-        ).await
+        insert_pool_storage(client.clone(), snipe_tx.pool, latest_block_number).await
     {
         Ok(cache_db) => cache_db,
         Err(e) => {
@@ -417,14 +408,11 @@ async fn process_tx(
         Ok(result) => result,
         Err(e) => {
             // ** if we get an error here GG
-            // ** remove the tx from the oracles
-            let mut oracle = shared_oracle.lock().await;
-            oracle.remove_tx_data(snipe_tx.clone());
-            let mut anti_rug_oracle = anti_rug_oracle.lock().await;
-            anti_rug_oracle.remove_tx_data(snipe_tx.clone());
-            log::warn!("We got Rugged, Removed tx from oracles");
-
-            return Err(anyhow!("Failed to simulate sell: {:?}", e));
+            // ** add plus 1 to the retries
+            let mut oracle_guard = shared_oracle.lock().await;
+            oracle_guard.update_attempts_to_sell(snipe_tx.clone());
+            drop(oracle_guard);
+            return Err(anyhow!("Failed to simulate early sell: {:?}", e));
         }
     };
 
@@ -444,19 +432,17 @@ async fn process_tx(
             Ok(tx) => tx,
             Err(e) => {
                 // ** if we get an error here GG
-                // ** remove the tx from the oracles
-                let mut oracle = shared_oracle.lock().await;
-                oracle.remove_tx_data(snipe_tx.clone());
-                let mut anti_rug_oracle = anti_rug_oracle.lock().await;
-                anti_rug_oracle.remove_tx_data(snipe_tx.clone());
-                log::warn!("We got Rugged, Removed tx from oracles");
+                // ** add plus 1 to the retries
+                let mut oracle_guard = shared_oracle.lock().await;
+                oracle_guard.update_attempts_to_sell(snipe_tx.clone());
+                drop(oracle_guard);
                 return Err(anyhow!("Failed to generate tx_data: {:?}", e));
             }
         };
 
         // ** miner tip
         // adjust the tip as you like
-        let miner_tip = U256::from(3000000000u128); // 3 gwei
+        let miner_tip = *MINER_TIP_TO_SELL; // 3 gwei
 
         // ** max fee per gas must always be higher than miner tip
         let max_fee_per_gas = next_block.base_fee + miner_tip;
@@ -476,12 +462,7 @@ async fn process_tx(
         // Because we want immedietly sell the token in the next block
         // We are sending the tx without Mev builders, hoping that the tx will be included in the next block
         let is_bundle_included = match
-            send_normal_tx(
-                client.clone(),
-                tx_data.clone(),
-                miner_tip,
-                max_fee_per_gas
-            ).await
+            send_normal_tx(client.clone(), tx_data.clone(), miner_tip, max_fee_per_gas).await
         {
             Ok(result) => result,
             Err(e) => {
@@ -496,10 +477,12 @@ async fn process_tx(
                 convert_wei_to_ether(tx_data.expected_amount)
             );
             // ** remove the tx from the oracle
-            let mut oracle = shared_oracle.lock().await;
-            oracle.remove_tx_data(snipe_tx.clone());
+            let mut oracle_guard = shared_oracle.lock().await;
+            oracle_guard.remove_tx_data(snipe_tx.clone());
+            drop(oracle_guard);
             let mut anti_rug_oracle = anti_rug_oracle.lock().await;
             anti_rug_oracle.remove_tx_data(snipe_tx.clone());
+            drop(anti_rug_oracle);
         } else {
             return Err(anyhow!("Bundle not included, will try again in the next block"));
         }

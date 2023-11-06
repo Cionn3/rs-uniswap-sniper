@@ -3,7 +3,6 @@ use tokio::sync::broadcast::Sender;
 
 use ethers::prelude::*;
 use tokio::sync::RwLock;
-use colored::Colorize;
 use crate::utils::types::events::NewBlockEvent;
 
 
@@ -133,20 +132,10 @@ pub fn start_block_oracle(
                     let latest_block = &lock.latest_block;
                     let next_block = &lock.next_block;
 
-                    log::info!(
-                        "{}",
-                        format!(
-                            "New Block: (number:{:?}, timestamp:{:?}, basefee:{:?}), Next Block: (number:{:?}, timestamp:{:?}, basefee:{:?})",
-                            latest_block.number,
-                            latest_block.timestamp,
-                            latest_block.base_fee,
-                            next_block.number,
-                            next_block.timestamp,
-                            next_block.base_fee
-                        )
-                            .bright_purple()
-                            .on_black()
-                    );
+                    
+                    log::info!("New Block: {}, Next Block: {}", latest_block.number,
+                        next_block.number);
+
                     // send the new block through channel
                     new_block_sender
                         .send(NewBlockEvent::NewBlock {

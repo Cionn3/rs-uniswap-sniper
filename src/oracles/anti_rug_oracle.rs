@@ -28,23 +28,6 @@ use crate::utils::types::{structs::*, events::*};
 
 
 
-// ** Pushes the new snipe tx data to the AntiRugOracle
-pub fn push_tx_data_to_antirug(
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    mut new_snipe_event_receiver: broadcast::Receiver<NewSnipeTxEvent>
-) {
-    tokio::spawn(async move {
-        while let Ok(snipe_event) = new_snipe_event_receiver.recv().await {
-            let snipe_event = match snipe_event {
-                NewSnipeTxEvent::SnipeTxData(snipe_event) => snipe_event,
-            };
-
-            let mut oracle = anti_rug_oracle.lock().await;
-            oracle.add_tx_data(snipe_event);
-        }
-    });
-}
-
 pub fn start_anti_rug(
     bot_config: BotConfig,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
@@ -52,6 +35,7 @@ pub fn start_anti_rug(
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
+        // client reconnect loop
         loop {
             let client = match create_local_client().await {
                 Ok(client) => client,
@@ -69,9 +53,15 @@ pub fn start_anti_rug(
                     MemPoolEvent::NewTx { tx } => tx,
                 };
                 // ** Get the snipe tx data from the oracle
-                let oracle = anti_rug_oracle.lock().await;
-                let snipe_txs = &oracle.tx_data;
-                // log::info!("txs len in Anti-Rug: {:?}", snipe_txs.len());
+                let snipe_txs = {
+                    let oracle = sell_oracle.lock().await;
+                    oracle.tx_data.clone()
+                };
+
+                // ** no snipe tx in oracle, skip
+                if snipe_txs.is_empty() {
+                    continue;
+                }
 
                 // ** get the pools from the SnipeTx
                 let vec_pools = snipe_txs
@@ -79,10 +69,6 @@ pub fn start_anti_rug(
                     .map(|x| x.pool)
                     .collect::<Vec<Pool>>();
 
-                // ** no pools yet in the oracle, skip
-                if vec_pools.is_empty() {
-                    continue;
-                }
 
                 // exclude our address
                 if pending_tx.from == get_my_address() || pending_tx.from == get_admin_address() {
@@ -188,9 +174,8 @@ pub fn start_anti_rug(
                             {
                                 Ok(amount_out) => amount_out,
                                 Err(e) => {
-                                    // TODO remove the tx from the oracle
                                     // if we we get an error here GG
-                                    log::error!(
+                                    log::warn!(
                                         "Failed to simulate Anti-Rug Before sell tx for Token: {:?} Err {:?}",
                                         pool.token_1,
                                         e
@@ -211,7 +196,7 @@ pub fn start_anti_rug(
                             {
                                 Ok(amount_out) => amount_out,
                                 Err(e) => {
-                                    log::error!(
+                                    log::warn!(
                                         "Failed to simulate Anti-Rug After sell tx for Token: {:?} Err {:?}",
                                         pool.token_1,
                                         e
@@ -247,12 +232,12 @@ pub fn start_anti_rug(
                                 {
                                     Ok(tx) => tx,
                                     Err(e) => {
-                                        log::error!("Failed to generate tx_data: {:?}", e);
+                                        log::warn!("Failed to generate tx_data: {:?}", e);
                                         return;
                                     }
                                 };
 
-                                // ** replace tx_data
+                                // ** replace frontrun_or_backrun with 0
                                 let tx_data = TxData {
                                     tx_call_data: tx_data.tx_call_data,
                                     access_list: tx_data.access_list,
@@ -268,6 +253,7 @@ pub fn start_anti_rug(
 
 
                                 // ** calculate miner tip based on the pending tx priority fee
+                                // ** here we could set a more aggressive miner tip
                                 let miner_tip = calculate_miner_tip(pending_tx_priority_fee);
 
                                 // ** max fee per gas must always be higher than miner tip
@@ -279,20 +265,9 @@ pub fn start_anti_rug(
                                     (next_block.base_fee + miner_tip) * tx_data.gas_used;
 
                                 if total_gas_cost > tx_data.expected_amount {
-                                    log::error!(
+                                    log::warn!(
                                         "Anti-Rug🚨: Doesnt Worth to escape the rug pool, GG"
                                     );
-                                    // ** find the corrosponding SnipeTx from the pool address
-                                    let snipe_tx = snipe_txs
-                                        .iter()
-                                        .find(|&x| x.pool.address == pool.address)
-                                        .unwrap();
-
-                                    // ** remove the tx from the anti-rug and sell oracle
-                                    let mut oracle = anti_rug_oracle_clone.lock().await;
-                                    oracle.remove_tx_data(snipe_tx.clone());
-                                    let mut sell_oracle = sell_oracle.lock().await;
-                                    sell_oracle.remove_tx_data(snipe_tx.clone());
                                     return;
                                 }
 
@@ -317,7 +292,7 @@ pub fn start_anti_rug(
                                 {
                                     Ok(is_included) => is_included,
                                     Err(e) => {
-                                        log::error!("Failed to send tx: {:?}", e);
+                                        log::warn!("Failed to send tx: {:?}", e);
                                         return;
                                     }
                                 };
@@ -333,24 +308,15 @@ pub fn start_anti_rug(
                                         .unwrap();
 
                                     // ** remove the tx from the anti-rug and sell oracle
-                                    let mut oracle = anti_rug_oracle_clone.lock().await;
-                                    oracle.remove_tx_data(snipe_tx.clone());
-                                    let mut sell_oracle = sell_oracle.lock().await;
-                                    sell_oracle.remove_tx_data(snipe_tx.clone());
+                                    let mut oracle_guard = anti_rug_oracle_clone.lock().await;
+                                    oracle_guard.remove_tx_data(snipe_tx.clone());
+                                    drop(oracle_guard);
+                                    let mut sell_oracle_guard = sell_oracle.lock().await;
+                                    sell_oracle_guard.remove_tx_data(snipe_tx.clone());
+                                    drop(sell_oracle_guard);
                                     log::info!("SnipeTx removed from the oracles");
                                 } else {
-                                    log::error!("Bundle not included, we are getting rugged! GG");
-                                    let snipe_tx = snipe_txs
-                                        .iter()
-                                        .find(|&x| x.pool.address == pool.address)
-                                        .unwrap();
-
-                                    // ** remove the tx from the anti-rug and sell oracle
-                                    let mut oracle = anti_rug_oracle_clone.lock().await;
-                                    oracle.remove_tx_data(snipe_tx.clone());
-                                    let mut sell_oracle = sell_oracle.lock().await;
-                                    sell_oracle.remove_tx_data(snipe_tx.clone());
-                                    log::info!("SnipeTx removed from the oracles");
+                                    log::warn!("Bundle not included, we are getting rugged! GG");
                                     return;
                                 }
                             } // end of if amount_out_after < amount_out_before * 8 / 10
@@ -388,9 +354,10 @@ pub fn anti_honeypot(
                     MemPoolEvent::NewTx { tx } => tx,
                 };
                 // ** Get the snipe tx data from the oracle
-                let oracle = anti_rug_oracle.lock().await;
-                let snipe_txs = &oracle.tx_data;
-                // log::info!("txs len in Anti-Honeypot: {:?}", snipe_txs.len());
+                let snipe_txs = {
+                    let oracle = sell_oracle.lock().await;
+                    oracle.tx_data.clone()
+                };
 
                 // ** get the pools from the SnipeTx
                 let vec_pools = snipe_txs
@@ -417,7 +384,6 @@ pub fn anti_honeypot(
                 let client = client.clone();
                 let anti_rug_oracle = anti_rug_oracle.clone();
                 let sell_oracle = sell_oracle.clone();
-                let snipe_txs = snipe_txs.clone();
                 let block_oracle = bot_config.block_oracle.clone();
 
                 tokio::spawn(async move {
@@ -483,7 +449,7 @@ pub fn anti_honeypot(
                         {
                             Ok(amount_out) => amount_out,
                             Err(e) => {
-                                log::error!("Failed to simulate sell tx: {:?}", e);
+                                log::warn!("Failed to simulate sell tx: {:?}", e);
                                 return;
                             }
                         };
@@ -500,7 +466,7 @@ pub fn anti_honeypot(
                         {
                             Ok(amount_out) => amount_out,
                             Err(e) => {
-                                log::error!("Failed to simulate sell tx: {:?}", e);
+                                log::warn!("Anti-HoneyPot: Failed to simulate sell tx: {:?}", e);
                                 return;
                             }
                         };
@@ -533,7 +499,7 @@ pub fn anti_honeypot(
                             {
                                 Ok(tx) => tx,
                                 Err(e) => {
-                                    log::error!("Failed to generate tx_data: {:?}", e);
+                                    log::warn!("Failed to generate tx_data: {:?}", e);
                                     return;
                                 }
                             };
@@ -565,21 +531,9 @@ pub fn anti_honeypot(
                                 (next_block.base_fee + miner_tip) * tx_data.gas_used;
 
                             if total_gas_cost > tx_data.expected_amount {
-                                log::error!(
+                                log::warn!(
                                     "Anti-Honeypot🚨: Doesnt Worth to escape the rug pool, GG"
                                 );
-                                // ** find the corrosponding SnipeTx from the touched pool address
-                                let snipe_tx = snipe_txs
-                                    .iter()
-                                    .find(|&x| x.pool.address == touched_pool.address)
-                                    .unwrap();
-
-                                // ** remove the tx from the oracles
-                                let mut oracle = anti_rug_oracle.lock().await;
-                                oracle.remove_tx_data(snipe_tx.clone());
-                                let mut sell_oracle = sell_oracle.lock().await;
-                                sell_oracle.remove_tx_data(snipe_tx.clone());
-                                log::info!("SnipeTx removed from the oracles");
                                 return;
                             }
                             log::info!("Escaping HoneyPot!🚀");
@@ -600,7 +554,7 @@ pub fn anti_honeypot(
                             {
                                 Ok(is_included) => is_included,
                                 Err(e) => {
-                                    log::error!("Failed to send tx: {:?}", e);
+                                    log::warn!("Failed to send tx: {:?}", e);
                                     return;
                                 }
                             };
@@ -622,19 +576,7 @@ pub fn anti_honeypot(
                                 sell_oracle.remove_tx_data(snipe_tx.clone());
                                 log::info!("SnipeTx removed from the oracles");
                             } else {
-                                log::error!("Bundle not included, we are getting rugged! GG");
-                                // ** find the corrosponding SnipeTx from the touched pool address
-                                let snipe_tx = snipe_txs
-                                    .iter()
-                                    .find(|&x| x.pool.address == touched_pool.address)
-                                    .unwrap();
-
-                                // ** remove the tx from the oracles
-                                let mut oracle = anti_rug_oracle.lock().await;
-                                oracle.remove_tx_data(snipe_tx.clone());
-                                let mut sell_oracle = sell_oracle.lock().await;
-                                sell_oracle.remove_tx_data(snipe_tx.clone());
-                                log::info!("SnipeTx removed from the oracles");
+                                log::warn!("Bundle not included, we are getting rugged! GG");
                                 return;
                             }
                         } // end of if amount_out_after < amount_out_before * 8 / 10

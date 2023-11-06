@@ -2,7 +2,6 @@ use ethers::prelude::*;
 
 use ethers::types::transaction::eip2930::AccessList;
 
-
 // Holds the data for a transaction
 #[derive(Debug, Clone)]
 pub struct TxData {
@@ -23,7 +22,7 @@ impl TxData {
         expected_amount: U256,
         sniper_contract_address: Address,
         pending_tx: Transaction,
-        frontrun_or_backrun: U256,
+        frontrun_or_backrun: U256
     ) -> Self {
         TxData {
             tx_call_data,
@@ -37,7 +36,6 @@ impl TxData {
     }
 }
 
-
 // Holds the data for our snipe transaction
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnipeTx {
@@ -50,6 +48,9 @@ pub struct SnipeTx {
     pub target_amount_weth: U256,
     pub block_bought: U64,
     pub pending_tx: Transaction,
+    pub snipe_retries: u8,
+    pub attempts_to_sell: u8,
+    pub tx_is_pending: bool,
 }
 
 impl SnipeTx {
@@ -62,7 +63,10 @@ impl SnipeTx {
         amount_in: U256,
         target_amount_weth: U256,
         block_bought: U64,
-        pending_tx: Option<Transaction>
+        pending_tx: Option<Transaction>,
+        snipe_retries: u8,
+        attempts_to_sell: u8,
+        tx_is_pending: bool
     ) -> Self {
         SnipeTx {
             tx_call_data,
@@ -74,10 +78,12 @@ impl SnipeTx {
             target_amount_weth,
             block_bought,
             pending_tx: pending_tx.unwrap_or_default(),
+            snipe_retries,
+            attempts_to_sell,
+            tx_is_pending,
         }
     }
 }
-
 
 // Holds Pool Information
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -102,7 +108,6 @@ impl Pool {
     }
 }
 
-
 // Sell Oracle, Holds All the token information we currently want to sell
 #[derive(Debug, Clone, PartialEq)]
 pub struct SellOracle {
@@ -114,26 +119,42 @@ impl SellOracle {
         SellOracle { tx_data: Vec::new() }
     }
 
+    // get the lenght of the vector
+    pub fn get_tx_len(&self) -> usize {
+        self.tx_data.len()
+    }
+
     // Add a new tx_data to the vector
     pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.push(tx_data);
+        if !self.tx_data.contains(&tx_data) {
+            self.tx_data.push(tx_data);
+        }
     }
 
     // Remove a tx_data from the vector
     pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.retain(|x| x != &tx_data);
+        log::info!("Sell Oracle: Removed {:?}", tx_data.pool.token_1);
+        self.tx_data.retain(|x| x.pool.token_1 != tx_data.pool.token_1);
     }
 
     // Update the target amount to sell for a specific tx_data
     pub fn update_target_amount(&mut self, snipe_tx: SnipeTx, target_amount: U256) {
         for tx in &mut self.tx_data {
-            if tx == &snipe_tx {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
                 tx.target_amount_weth = target_amount;
             }
         }
     }
+    // Updates the retries counter
+    pub fn update_attempts_to_sell(&mut self, snipe_tx: SnipeTx) {
+        for tx in &mut self.tx_data {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
+                tx.attempts_to_sell += 1;
+                log::warn!("Sell Oracle: Updated retry counter to: {:?}", tx.attempts_to_sell);
+            }
+        }
+    }
 }
-
 
 // Same as above but for AntiRug
 #[derive(Debug, Clone, PartialEq)]
@@ -146,15 +167,22 @@ impl AntiRugOracle {
         AntiRugOracle { tx_data: Vec::new() }
     }
 
+    // get the lenght of the vector
+    pub fn get_tx_len(&self) -> usize {
+        self.tx_data.len()
+    }
+
     pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.push(tx_data);
+        if !self.tx_data.contains(&tx_data) {
+            self.tx_data.push(tx_data);
+        }
     }
 
     pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.retain(|x| x != &tx_data);
+        log::info!("Anti-Rug Oracle: Removed {:?}", tx_data.pool.token_1);
+        self.tx_data.retain(|x| x.pool.token_1 != tx_data.pool.token_1);
     }
 }
-
 
 // Same as above but for Retry
 #[derive(Debug, Clone, PartialEq)]
@@ -168,10 +196,33 @@ impl RetryOracle {
     }
 
     pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.push(tx_data);
+        if !self.tx_data.contains(&tx_data) {
+            self.tx_data.push(tx_data);
+        }
     }
 
     pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        self.tx_data.retain(|x| x != &tx_data);
+        log::info!("Retry Oracle: Removed {:?}", tx_data.pool.token_1);
+        self.tx_data.retain(|x| x.pool.token_1 != tx_data.pool.token_1);
+    }
+
+    // Updates the retries counter
+    pub fn update_retry_counter(&mut self, snipe_tx: SnipeTx) {
+        for tx in &mut self.tx_data {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
+                tx.snipe_retries += 1;
+                log::warn!("Retry Oracle: Updated retry counter to: {:?}", tx.snipe_retries);
+            }
+        }
+    }
+
+    // set the tx if its pending or not
+    pub fn set_tx_is_pending(&mut self, snipe_tx: SnipeTx, tx_is_pending: bool) {
+        for tx in &mut self.tx_data {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
+                tx.tx_is_pending = tx_is_pending;
+                log::info!("Tx Set to {:?}", tx_is_pending);
+            }
+        }
     }
 }

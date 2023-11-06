@@ -25,13 +25,26 @@ pub fn start_mempool_stream(new_tx_sender: Sender<MemPoolEvent>) {
                 continue;
             };
 
-            // define transfer methodid
-            let transfer_id: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+            // transfer method
+           // let transfer_id: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 
+           // you can comment this out to filter out transfer transactions which is irrelevant
+           // but it may be possible for a honeypot contract to implement a function which leads to the exact same function signature
+           // so i think we should keep it that way
+            
             while let Some(tx) = mempool_stream.next().await {
+
+                /* 
                 // if method id is transfer, skip
                 if tx.input.0.len() >= 4 && tx.input.0[0..4] == transfer_id {
                    // log::info!("skipped Tx with Transfer method: {:?}", tx.hash);
+                    continue;
+                }
+                */
+            
+                // if tx.to is address zero, skip
+                if tx.to == Some(Address::zero()) {
+                    //log::info!("skipped Tx with address zero: {:?}", tx.hash);
                     continue;
                 }
 

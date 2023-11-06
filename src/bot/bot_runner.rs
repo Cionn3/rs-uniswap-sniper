@@ -5,25 +5,20 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use anyhow::anyhow;
 
-
 use ethers::types::transaction::eip2930::AccessList;
 use crate::forked_db::fork_factory::ForkFactory;
 use crate::utils::simulate::insert_pool_storage;
 use crate::utils::simulate::simulate::{ tax_check, generate_buy_tx_data, transfer_check };
-use crate::utils::helpers::{ calculate_miner_tip, convert_wei_to_gwei, create_local_client };
+use crate::utils::helpers::*;
 use super::send_tx::send_tx;
-use crate::utils::types::{structs::*, events::*};
+use crate::utils::types::{ structs::*, events::* };
 use revm::db::{ CacheDB, EmptyDB };
 
 use super::bot_config::BotConfig;
 
-
-
-
 pub fn start_sniper(
     bot_config: BotConfig,
     mut new_pair_receiver: broadcast::Receiver<NewPairEvent>,
-    new_snipe_event_sender: broadcast::Sender<NewSnipeTxEvent>,
     sell_oracle: Arc<Mutex<SellOracle>>,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
     retry_oracle: Arc<Mutex<RetryOracle>>
@@ -41,7 +36,6 @@ pub fn start_sniper(
                             bot_config.clone(),
                             pool,
                             tx,
-                            new_snipe_event_sender.clone(),
                             sell_oracle.clone(),
                             anti_rug_oracle.clone(),
                             retry_oracle.clone()
@@ -61,7 +55,6 @@ async fn process_tx(
     bot_config: BotConfig,
     pool: Pool,
     pending_tx: Transaction,
-    new_snipe_event_sender: broadcast::Sender<NewSnipeTxEvent>,
     sell_oracle: Arc<Mutex<SellOracle>>,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
     retry_oracle: Arc<Mutex<RetryOracle>>
@@ -113,10 +106,13 @@ async fn process_tx(
             target_amount_weth: bot_config.target_amount_to_sell,
             tx_call_data: Bytes::new(),
             access_list: AccessList::default(),
-            gas_used: (0u64),
+            gas_used: 0u64,
             sniper_contract_address: Address::zero(),
             pending_tx: pending_tx.clone(),
             block_bought: next_block.number,
+            attempts_to_sell: 0u8, // attempts to sell
+            snipe_retries: 0u8, // snipe retries
+            tx_is_pending: false,
         };
         // push it to retry oracle
         let mut retry_oracle = retry_oracle.lock().await;
@@ -144,7 +140,7 @@ async fn process_tx(
     // simulate the tx once again and generate accesslist
 
     let snipe_tx = match
-    generate_buy_tx_data(
+        generate_buy_tx_data(
             &pool,
             amount_in,
             &next_block,
@@ -160,10 +156,9 @@ async fn process_tx(
     };
 
     // if the tx is legacy should return 0
-    let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
+    // let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
 
-    // ** calculate the miner tip
-    let miner_tip = calculate_miner_tip(pending_tx_priority_fee);
+    let miner_tip = *MINER_TIP_TO_SNIPE;
     log::info!("Sniping with miner tip: {:?}", convert_wei_to_gwei(miner_tip));
 
     // ** max fee per gas must always be higher than base fee
@@ -193,15 +188,20 @@ async fn process_tx(
 
     // ** Send The Tx To Flashbots **
     log::info!("Token {:?} Passed All Checks! 🚀", pool.token_1);
-    log::info!("Sending Tx...");
 
     // send the new tx to oracles before sending to flashbots
     // it takes time to get the bundle response
     // We dont want to get rugged while we wait
 
-    // send the new snipe event
-    new_snipe_event_sender.send(NewSnipeTxEvent::SnipeTxData(snipe_tx.clone())).unwrap();
-    log::info!("New Snipe Event Sent To Sell Oracle! 🚀");
+    // add the snipe_tx to oracles
+    let mut sell_oracle_guard = sell_oracle.lock().await;
+    sell_oracle_guard.add_tx_data(snipe_tx.clone());
+    drop(sell_oracle_guard);
+
+    let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+    anti_rug_oracle_guard.add_tx_data(snipe_tx.clone());
+    drop(anti_rug_oracle_guard);
+    log::info!("Token {:?} Sent To Oracles! 🚀", pool.token_1);
 
     let is_bundle_included = match
         send_tx(
@@ -214,24 +214,28 @@ async fn process_tx(
     {
         Ok(result) => result,
         Err(e) => {
-            log::error!("Failed to send tx to flashbots: {:?}", e);
+            log::warn!("Failed to send tx to flashbots: {:?}", e);
             //return Err(anyhow!("Failed to send tx to flashbots: {:?}", e));
             false
         }
     };
 
-    // send the new snipe event only if the bundle is included
-    if is_bundle_included {
-        // send the new snipe event
-        // new_snipe_event_sender.send(NewSnipeTxEvent::SnipeTxData(snipe_tx)).unwrap();
-
-    } else {
+    // if the bundle is not included
+    if is_bundle_included == false {
         // remove the snipe_tx from the oracles
-        let mut sell_oracle = sell_oracle.lock().await;
-        sell_oracle.remove_tx_data(snipe_tx.clone());
-        let mut anti_rug_oracle = anti_rug_oracle.lock().await;
-        anti_rug_oracle.remove_tx_data(snipe_tx.clone());
-        log::info!("Snipe Tx Removed From Oracles! 🚀");
+        let mut sell_oracle_guard = sell_oracle.lock().await;
+        sell_oracle_guard.remove_tx_data(snipe_tx.clone());
+        drop(sell_oracle_guard);
+        let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+        anti_rug_oracle_guard.remove_tx_data(snipe_tx.clone());
+        drop(anti_rug_oracle_guard);
+        log::info!("Token {:?} Removed From Oracles! 🚀", pool.token_1);
+
+        // and push it to retry oracle
+        let mut retry_oracle = retry_oracle.lock().await;
+        retry_oracle.add_tx_data(snipe_tx.clone());
+        log::info!("Token {:?} Sent To Retry Oracle! 🚀", pool.token_1);
+
         return Err(anyhow!("Bundle Not Included"));
     }
 
@@ -240,7 +244,6 @@ async fn process_tx(
 
 pub fn snipe_retry(
     bot_config: BotConfig,
-    new_snipe_event_sender: broadcast::Sender<NewSnipeTxEvent>,
     sell_oracle: Arc<Mutex<SellOracle>>,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
     retry_oracle: Arc<Mutex<RetryOracle>>,
@@ -290,24 +293,23 @@ pub fn snipe_retry(
                 );
 
                 for tx in snipe_txs {
-                    let new_snipe_event_sender = new_snipe_event_sender.clone();
+                    // if the tx is pending skip
+                    if tx.tx_is_pending {
+                        continue;
+                    }
+                    // if we reached the retry limit remove tx from oracles
+                    if tx.snipe_retries >= *MAX_SNIPE_RETRIES {
+                        // remove tx from retry oracle
+                        let mut retry_oracle = retry_oracle.lock().await;
+                        retry_oracle.remove_tx_data(tx.clone());
+                        drop(retry_oracle);
+                        log::warn!("Retries >= 10, Removed tx from oracles");
+                        continue;
+                    }
+
                     let sell_oracle = sell_oracle.clone();
                     let anti_rug_oracle = anti_rug_oracle.clone();
                     let retry_oracle = retry_oracle.clone();
-
-                    // we can use block_bought as the block
-                    // that the tx entered into the retry oracle
-
-                    // for the first iteration should return true
-                    // and then false so we dont try again
-                    let blocks_passed = latest_block.number == tx.block_bought;
-                    // only retry for the next block
-                    if !blocks_passed {
-                        let mut retry_oracle = retry_oracle.lock().await;
-                        retry_oracle.remove_tx_data(tx.clone());
-                        log::info!("Snipe Tx Removed From Retry Oracle! 🚀");
-                        continue;
-                    }
 
                     let client = client.clone();
                     let amount_in = bot_config.initial_amount_in_weth;
@@ -315,11 +317,7 @@ pub fn snipe_retry(
 
                     // initialize cache db
                     let cache_db = match
-                        insert_pool_storage(
-                            client.clone(),
-                            tx.pool,
-                            latest_block_number
-                        ).await
+                        insert_pool_storage(client.clone(), tx.pool, latest_block_number).await
                     {
                         Ok(cache_db) => cache_db,
                         Err(e) => {
@@ -349,14 +347,20 @@ pub fn snipe_retry(
                             Ok(result) => result,
                             Err(e) => {
                                 log::error!("Retry Tax Check Failed: {:?}", e);
+                                // update the retry counter
+                                let mut retry_oracle_guard = retry_oracle.lock().await;
+                                retry_oracle_guard.update_retry_counter(tx.clone());
+                                drop(retry_oracle_guard);
                                 return;
                             }
                         };
+
+                        // if we fail to swap
                         if !swap {
-                            // remove tx from retry oracle
-                            let mut retry_oracle = retry_oracle.lock().await;
-                            retry_oracle.remove_tx_data(tx.clone());
-                            log::info!("Retry failed, removed from retry oracle! 🚀");
+                            // update the retry counter
+                            let mut retry_oracle_guard = retry_oracle.lock().await;
+                            retry_oracle_guard.update_retry_counter(tx.clone());
+                            drop(retry_oracle_guard);
                             return;
                         }
 
@@ -373,6 +377,10 @@ pub fn snipe_retry(
                             Ok(result) => result,
                             Err(e) => {
                                 log::error!("Retry Tax Check Failed: {:?}", e);
+                                // update the retry counter
+                                let mut retry_oracle_guard = retry_oracle.lock().await;
+                                retry_oracle_guard.update_retry_counter(tx.clone());
+                                drop(retry_oracle_guard);
                                 return;
                             }
                         };
@@ -380,7 +388,7 @@ pub fn snipe_retry(
                         // simulate the tx once again and generate accesslist
 
                         let snipe_tx = match
-                        generate_buy_tx_data(
+                            generate_buy_tx_data(
                                 &tx.pool,
                                 amount_in,
                                 &next_block,
@@ -396,8 +404,7 @@ pub fn snipe_retry(
                         };
 
                         // change the miner tip as you like
-                        let miner_tip = U256::from(1000000000u128); // 1 gwei
-                        log::info!("Sniping with 1 gwei");
+                        let miner_tip = *MINER_TIP_TO_SNIPE_RETRY;
 
                         // ** max fee per gas must always be higher than miner tip
                         let max_fee_per_gas = next_block.base_fee + miner_tip;
@@ -422,15 +429,24 @@ pub fn snipe_retry(
                         // ** If gas cost is more than amount_in we dont snipe
                         // you can remove this check if you want to snipe anyway
                         if total_gas_cost > snipe_tx.amount_in {
-                            log::error!("Gas Cost Is Higher Than Amount In");
+                            log::warn!("Gas Cost Is Higher Than Amount In");
                             return;
                         }
 
-                        // send the new snipe event
-                        new_snipe_event_sender
-                            .send(NewSnipeTxEvent::SnipeTxData(snipe_tx.clone()))
-                            .unwrap();
-                        log::info!("Retry: New Tx Sent to Oracles! 🚀");
+                        // add the snipe_tx to oracles
+                        let mut sell_oracle_guard = sell_oracle.lock().await;
+                        sell_oracle_guard.add_tx_data(snipe_tx.clone());
+                        drop(sell_oracle_guard);
+
+                        let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+                        anti_rug_oracle_guard.add_tx_data(snipe_tx.clone());
+                        drop(anti_rug_oracle_guard);
+                        log::info!("Retry Oracle: Sent Tx To Oracles! 🚀");
+
+                        // set the tx as pending so we dont have any confilcts in the next iteration
+                        let mut retry_oracle_guard = retry_oracle.lock().await;
+                        retry_oracle_guard.set_tx_is_pending(tx.clone(), true);
+                        drop(retry_oracle_guard);
 
                         let is_bundle_included = match
                             send_tx(
@@ -443,24 +459,35 @@ pub fn snipe_retry(
                         {
                             Ok(result) => result,
                             Err(e) => {
-                                log::error!("Failed to send tx to flashbots: {:?}", e);
+                                log::warn!("Failed to send tx to flashbots: {:?}", e);
                                 false // set is_bundle_included to false if there's an error
                             }
                         };
 
                         if is_bundle_included {
                             // remove it from the retry oracle
-                            let mut retry_oracle = retry_oracle.lock().await;
-                            retry_oracle.remove_tx_data(snipe_tx.clone());
+                            let mut retry_oracle_guard = retry_oracle.lock().await;
+                            retry_oracle_guard.remove_tx_data(tx.clone());
+                            drop(retry_oracle_guard);
+                            log::info!("Bundle Included! 🚀");
+                            log::info!("Removed Token {:?} From Retry Oracle! 🚀", tx.pool.token_1);
                         } else {
-                            // remove the snipe_tx from the sell and antirug oracles
+                            // update the retry counter
+                            let mut retry_oracle_guard = retry_oracle.lock().await;
+                            retry_oracle_guard.update_retry_counter(tx.clone());
+
+                            // update the pending status to false
+                            retry_oracle_guard.set_tx_is_pending(tx.clone(), false);
+                            drop(retry_oracle_guard);
+
+                            // remove the tx from oracles so we dont get bombarded with logs
                             let mut sell_oracle = sell_oracle.lock().await;
                             sell_oracle.remove_tx_data(snipe_tx.clone());
+                            drop(sell_oracle);
                             let mut anti_rug_oracle = anti_rug_oracle.lock().await;
                             anti_rug_oracle.remove_tx_data(snipe_tx.clone());
-
-                            log::info!("Snipe Tx Removed From Oracles! 🚀");
-                            log::error!("Bundle Not Included");
+                            drop(anti_rug_oracle);
+                            log::warn!("Bundle Not Included");
                             return;
                         }
                     }); // end of tokio::spawn

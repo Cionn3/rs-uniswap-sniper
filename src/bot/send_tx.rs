@@ -95,7 +95,7 @@ pub async fn send_tx(
 
                 match simulated_bundle {
                     Ok(sim_result) => {
-                        log::info!("Simulated Bundle Result: {:?}", sim_result);
+                       // log::info!("Simulated Bundle Result: {:?}", sim_result);
                     }
                     Err(e) => {
                         log::error!("Failed to simulate bundle: {}", e);

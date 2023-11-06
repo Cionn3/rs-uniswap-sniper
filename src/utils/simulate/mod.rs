@@ -16,12 +16,10 @@ use crate::forked_db::fork_db::ForkDB;
 use crate::oracles::block_oracle::BlockInfo;
 use revm::primitives::{ ExecutionResult, Output, TransactTo, AccountInfo };
 use revm::db::{ CacheDB, EmptyDB };
-use crate::utils::{helpers::*, types::structs::Pool};
+use crate::utils::{ helpers::*, types::structs::Pool };
 use std::sync::Arc;
 use revm::primitives::{ Address as rAddress, Bytecode, U256 as rU256 };
 use anyhow::anyhow;
-
-
 
 // Setup evm blockstate
 //
@@ -35,10 +33,10 @@ pub fn setup_block_state(evm: &mut EVM<ForkDB>, next_block: &BlockInfo) {
     evm.env.block.timestamp = next_block.timestamp.into();
     evm.env.block.basefee = next_block.base_fee.into();
     // use something other than default
-    evm.env.block.coinbase =
-        rAddress::from_str("0xDecafC0FFEe15BAD000000000000000000000000").unwrap();
+    evm.env.block.coinbase = rAddress
+        ::from_str("0xDecafC0FFEe15BAD000000000000000000000000")
+        .unwrap();
 }
-
 
 // simulate a token call to the pool address
 // returns token0 and token1
@@ -266,9 +264,10 @@ fn commit_tx_with_inspector(
     evm: &mut EVM<ForkDB>,
     call_data: Vec<u8>,
     next_block: &BlockInfo,
-    token: &Address
+    token: &Address,
+    caller: Address
 ) -> Result<bool, anyhow::Error> {
-    evm.env.tx.caller = get_my_address().into();
+    evm.env.tx.caller = caller.into();
     evm.env.tx.transact_to = TransactTo::Call(get_snipe_contract_address().0.into());
     evm.env.tx.data = call_data.into();
     evm.env.tx.value = rU256::ZERO;
@@ -288,12 +287,14 @@ fn commit_tx_with_inspector(
     // define a bool if the tx is reverted
     let is_tx_reverted = match result {
         ExecutionResult::Success { .. } => false,
-        ExecutionResult::Revert { .. } => true,
+        ExecutionResult::Revert { output, .. } => {
+           // log::error!("Token {:?} Tx Reverted: {:?}", token, output);
+            true
+        }
         ExecutionResult::Halt { .. } => true,
     };
 
     // match the inspector to see if token is safu
-
     match salmonella_inspector.is_safu() {
         IsSafu::Safu => {}
         IsSafu::NotSafu(not_safu_opcodes) => {
@@ -353,7 +354,6 @@ fn commit_tx_with_access_list(
 
     Ok((convert_access_list(access_list), gas_used))
 }
-
 
 // inserts pool storage into cache db
 pub async fn insert_pool_storage(
