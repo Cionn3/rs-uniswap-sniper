@@ -241,7 +241,8 @@ fn get_all_urls() -> Vec<Url> {
         "https://builder.gmbit.co/rpc",
         "https://mev.api.blxrbdn.com/",
         "https://boba-builder.com/searcher/",
-        "https://blockbeelder.com/rpc"
+        "https://blockbeelder.com/rpc",
+        "https://rpc.lokibuilder.xyz"
     ];
 
     let mut urls: Vec<Url> = vec![];
