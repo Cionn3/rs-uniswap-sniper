@@ -1,20 +1,19 @@
 pub mod simulate;
 pub use simulate::*;
 
-pub mod is_safu;
-pub use is_safu::*;
-
 pub mod access_list;
 pub use access_list::*;
 
 use ethers::prelude::*;
 use std::str::FromStr;
 use ethers::abi::parse_abi;
+use ethers::abi::Tokenizable;
+use ethabi::{ RawLog, Event };
 use ethers::types::transaction::eip2930::AccessList;
 use revm::EVM;
 use crate::forked_db::fork_db::ForkDB;
 use crate::oracles::block_oracle::BlockInfo;
-use revm::primitives::{ ExecutionResult, Output, TransactTo, AccountInfo };
+use revm::primitives::{ ExecutionResult, Output, TransactTo, AccountInfo, Log };
 use revm::db::{ CacheDB, EmptyDB };
 use crate::utils::{ helpers::*, types::structs::Pool };
 use std::sync::Arc;
@@ -124,6 +123,23 @@ fn simulate_token_call(
     };
 
     Ok((token_0, token_1))
+}
+
+pub fn get_token_balance(
+    token: Address,
+    owner: Address,
+    next_block: &BlockInfo,
+    fork_db: ForkDB
+) -> Result<U256, anyhow::Error> {
+
+    let mut evm = revm::EVM::new();
+    evm.database(fork_db.clone());
+
+    // setup the next block state
+    setup_block_state(&mut evm, next_block);
+
+   let balance = get_balance_of_evm(token, owner, next_block, &mut evm)?;
+   Ok(balance)
 }
 
 // Get token balance
@@ -259,14 +275,17 @@ fn commit_tx(
     Ok(())
 }
 
-// commit tx with salmonella inspector
-fn commit_tx_with_inspector(
+// commit tx and return logs
+// returns a bool, true if tx is reverted, false otherwise
+// returns a vector of logs
+fn commit_tx_and_return_logs(
     evm: &mut EVM<ForkDB>,
     call_data: Vec<u8>,
     next_block: &BlockInfo,
     token: &Address,
-    caller: Address
-) -> Result<bool, anyhow::Error> {
+    caller: Address,
+    commit_to_db: bool
+) -> Result<(bool, Vec<Log>), anyhow::Error> {
     evm.env.tx.caller = caller.into();
     evm.env.tx.transact_to = TransactTo::Call(get_snipe_contract_address().0.into());
     evm.env.tx.data = call_data.into();
@@ -274,41 +293,39 @@ fn commit_tx_with_inspector(
     evm.env.tx.gas_limit = 1000000;
     evm.env.tx.gas_price = next_block.base_fee.into();
 
-    let mut salmonella_inspector = SalmonellaInspectoooor::new();
-
+    let result;
+    
+    if commit_to_db {
     // simulate tx and write to db
-    let result = match evm.inspect_commit(&mut salmonella_inspector) {
+    result = match evm.transact_commit() {
         Ok(result) => result,
         Err(e) => {
             return Err(anyhow!("Failed to commit Tax Check: {:?}", e));
         }
     };
+} else {
+    // simulate tx without writing to db
+    result = match evm.transact_ref() {
+        Ok(result) => result.result,
+        Err(e) => {
+            return Err(anyhow!("Failed to commit Tax Check: {:?}", e));
+        }
+    };
+}
+
+    let logs = result.logs();
 
     // define a bool if the tx is reverted
     let is_tx_reverted = match result {
         ExecutionResult::Success { .. } => false,
         ExecutionResult::Revert { output, .. } => {
-           // log::error!("Token {:?} Tx Reverted: {:?}", token, output);
+            log::error!("Token {:?} Tx Reverted: {:?}", token, output);
             true
         }
         ExecutionResult::Halt { .. } => true,
     };
 
-    // match the inspector to see if token is safu
-    match salmonella_inspector.is_safu() {
-        IsSafu::Safu => {}
-        IsSafu::NotSafu(not_safu_opcodes) => {
-            return Err(
-                anyhow!(
-                    "Token {:?} is not safu, found the following opcodes: {:?}",
-                    token,
-                    not_safu_opcodes
-                )
-            );
-        }
-    }
-
-    Ok(is_tx_reverted)
+    Ok((is_tx_reverted, logs))
 }
 
 // commit tx with access list inspector
@@ -317,7 +334,7 @@ fn commit_tx_with_access_list(
     evm: &mut EVM<ForkDB>,
     call_data: Vec<u8>,
     next_block: &BlockInfo
-) -> Result<(AccessList, u64), anyhow::Error> {
+) -> Result<(AccessList, u64, Vec<Log>), anyhow::Error> {
     // setup evm for swap
     evm.env.tx.caller = get_my_address().into();
     evm.env.tx.transact_to = TransactTo::Call(get_snipe_contract_address().0.into());
@@ -350,10 +367,97 @@ fn commit_tx_with_access_list(
         }
     };
 
+    let logs = tx_result.logs();
     let gas_used = tx_result.gas_used();
 
-    Ok((convert_access_list(access_list), gas_used))
+    Ok((convert_access_list(access_list), gas_used, logs))
 }
+
+// get the real amount of tokens we are going to receive from the swap
+// returns real amount and amount from swap
+pub fn get_real_amount_from_logs(
+    logs: Vec<Log>,
+    pool_address: H160,
+    swap_event: Event,
+    transfer_event: Event
+) -> Result<(U256, U256), anyhow::Error> {
+    // hold decoded events
+    let mut swap_opt = None;
+    let mut transfer_logs = Vec::new();
+
+    for log in &logs {
+        // convert logs topics to H256
+        let converted_topics: Vec<_> = log.topics
+            .iter()
+            .map(|b256| H256::from_slice(b256.as_bytes()))
+            .collect();
+
+        // check for the swap event
+        if
+            let Ok(decoded_log) = swap_event.parse_log(RawLog {
+                topics: converted_topics.clone(),
+                data: log.data.clone().to_vec(),
+            })
+        {
+            swap_opt = Some(decoded_log);
+        }
+
+        // push all transfer logs to the vector
+        if
+            let Ok(decoded_log) = transfer_event.parse_log(RawLog {
+                topics: converted_topics.clone(),
+                data: log.data.clone().to_vec(),
+            })
+        {
+            transfer_logs.push(decoded_log);
+        }
+    }
+
+    // if for some reason we dont get the swap log (unlikely) return err
+    let swap_log = match swap_opt {
+        Some(swap) => swap,
+        None => {
+            return Err(anyhow!("Swap event not found"));
+        }
+    };
+
+    // same for transfer
+    if transfer_logs.is_empty() {
+        return Err(anyhow!("Transfer events not found"));
+    }
+
+    // get the amount of tokens we are going to receive from the swap_log
+    let amount_0_out = swap_log.params[3].value.clone().into_token().into_uint().unwrap();
+    let amount_1_out = swap_log.params[4].value.clone().into_token().into_uint().unwrap();
+
+    // the amount of tokens should be either amount 0 out or amount 1 out
+    // which ever is not zero is the tokens we receive
+    let token_amount_from_swap = if amount_0_out == U256::zero() { amount_1_out } else { amount_0_out };
+    let mut got_amount = false;
+    let mut real_amount = U256::zero();
+
+    // now we find the transfer log that sends the tokens to our contract address
+    for log in transfer_logs {
+        // from address must be the pool address
+        let from = log.params[0].value.clone().into_token().into_address().unwrap();
+        // to address must be our contract address
+        let to = log.params[1].value.clone().into_token().into_address().unwrap();
+
+        if from == pool_address && to == get_snipe_contract_address() {
+            // get the amount of tokens
+            real_amount = log.params[2].value.clone().into_token().into_uint().unwrap();
+            got_amount = true;
+        }
+    }
+
+    if !got_amount {
+        return Err(anyhow!("Something broke! We didnt find the token amount from transfer logs"));
+    }
+
+    Ok((real_amount, token_amount_from_swap))
+}
+
+
 
 // inserts pool storage into cache db
 pub async fn insert_pool_storage(

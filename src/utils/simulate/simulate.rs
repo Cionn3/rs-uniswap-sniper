@@ -17,6 +17,8 @@ pub fn tax_check(
     amount_in_weth: U256,
     next_block: &BlockInfo,
     pending_tx: Option<Transaction>,
+    transfer_event: Event,
+    swap_event: Event,
     fork_db: ForkDB
 ) -> Result<bool, anyhow::Error> {
     let mut evm = revm::EVM::new();
@@ -31,10 +33,10 @@ pub fn tax_check(
         commit_pending_tx(&mut evm, &tx)?;
     }
 
-    // enable checks
-    evm.env.cfg.disable_base_fee = false;
-    evm.env.cfg.disable_block_gas_limit = false;
-    evm.env.cfg.disable_balance_check = false;
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
@@ -47,88 +49,110 @@ pub fn tax_check(
 
     // ** simulate the tax check **
     // ** We do a buy/sell on the same block **
-    // ** We could skip Salmonela Inspector **
 
-    let is_buy_reverted = commit_tx_with_inspector(
+    let (is_buy_reverted, logs) = commit_tx_and_return_logs(
         &mut evm,
         call_data,
         next_block,
         &pool.token_1,
-        get_my_address() // caller
+        get_my_address(), // caller
+        true // apply state changes to db
     )?;
+
+    // if the swap is reverted usually there is 2 reasons
+    // 1. Trading is not open yet
+    // 2. The token has a maximum or minimum buy size which we may not met
+    // we return false so we can push it to retry oracle
+    if is_buy_reverted {
+        log::warn!("Buy reverted {:?}", pool.token_1);
+        return Ok(false);
+    }
+
+    // ** we check the logs to see the actual amount of tokens the pool is gonna send us
+
+    let (real_amount, amount_from_swap) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event.clone(),
+        transfer_event.clone()
+    )?;
+
+    // if the actual amount of tokens is less than 70% of the amount we should receive
+    // then we skip the token
+    if real_amount < (amount_from_swap * 7) / 10 {
+        log::error!("Amount From Swap {:?}", amount_from_swap);
+        log::error!("Real Amount {:?}", real_amount);
+        return Err(anyhow!("Skipped Token, Buy Tax > 30%: {:?}", pool.token_1));
+    }
 
     // ** Do the sell Transaction **
-
-    // ** Get The Token Balance for the amount_in to sell **
-    let amount_in_token = get_balance_of_evm(
-        pool.token_1, // shitcoin
-        get_snipe_contract_address(),
-        next_block,
-        &mut evm
-    )?;
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
         pool.token_1, // shitcoin
         pool.token_0, // weth
         pool.address,
-        amount_in_token,
+        real_amount,
         U256::from(0u128)
     );
 
-    let is_sell_reverted = commit_tx_with_inspector(
+    // try to avoid the transfer delay error buy setting the block 1 number further
+    evm.env.block.number = rU256::from(next_block.number.as_u64() + 1);
+    evm.env.block.timestamp = (next_block.timestamp + U256::from(12u128)).into();
+
+    let (is_sell_reverted, logs) = commit_tx_and_return_logs(
         &mut evm,
         call_data,
         next_block,
         &pool.token_1,
-        get_my_address() // caller
+        get_my_address(), // caller
+        true // apply state changes to db
     )?;
 
-    // get the post balance of weth
-    let final_amount_weth = get_balance_of_evm(
-        pool.token_0, // weth
-        get_snipe_contract_address(),
-        next_block,
-        &mut evm
-    )?;
-
-    if is_buy_reverted {
-        log::warn!("Buy reverted {:?}", pool.token_1);
-        return Ok(false);
-    }
-
+    // same as above
     if is_sell_reverted {
-        log::error!("Sell reverted {:?}", pool.token_1);
+        log::warn!("Sell reverted {:?}", pool.token_1);
         return Ok(false);
     }
 
-    // Check if the final WETH amount is less than 80% of the expected amount
-    // change this as you like
-    if final_amount_weth < (amount_in_weth * 8) / 10 {
-        return Err(
-            anyhow!("Skipped Token, we lost more than 20% in a buy/sell: {:?}", pool.token_1)
-        );
+    // ** The same as above but now we check the amount of weth we are going to receive
+
+    let (real_weth_amount, _) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event.clone(),
+        transfer_event.clone()
+    )?;
+
+    // if the actual amount of weth is less than 70% of the amount in weth
+    // then we skip the token
+    if real_weth_amount < (amount_in_weth * 7) / 10 {
+        log::error!("Amount In Weth {:?}", convert_wei_to_ether(amount_in_weth));
+        log::error!("Real Weth Amount out {:?}", convert_wei_to_ether(real_weth_amount));
+        return Err(anyhow!("Skipped Token, Sell Tax > 30%: {:?}", pool.token_1));
     }
 
     // ** SIMULATE SELL 200 BLOCKS FURTHER
     // Now Do one more check but this time we sell 200 blocks further
+    // ** Not really sure if it really works but its worth a try
 
-    // setup a new db
+    // setup a new evm instance
     let mut evm = revm::EVM::new();
     evm.database(fork_db);
 
-    // ** setup the next block state
+    // setup the next block state
     setup_block_state(&mut evm, next_block);
 
-    if let Some(tx) = pending_tx {
-        // first simulate and commit the pending tx so we can buy the token
+    // if we have a pending tx simulate it
+    if let Some(tx) = pending_tx.clone() {
+        // commit the pending tx so we can buy the token
         commit_pending_tx(&mut evm, &tx)?;
     }
 
-    // enable checks
-    evm.env.cfg.disable_base_fee = false;
-    evm.env.cfg.disable_block_gas_limit = false;
-    evm.env.cfg.disable_balance_check = false;
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
@@ -140,13 +164,19 @@ pub fn tax_check(
     );
 
     // ** simulate the buy swap
-    let is_buy_reverted = commit_tx_with_inspector(
+    let (is_buy_reverted, logs) = commit_tx_and_return_logs(
         &mut evm,
         call_data,
         next_block,
         &pool.token_1,
-        get_my_address() // caller
+        get_my_address(), // caller
+        true // apply state changes to db
     )?;
+
+    if is_buy_reverted {
+        log::warn!("Buy reverted after 200 blocks {:?}", pool.token_1);
+        return Ok(false);
+    }
 
     // ** Do the sell Transaction **
 
@@ -155,58 +185,58 @@ pub fn tax_check(
     evm.env.block.timestamp = (next_block.timestamp + U256::from(2400u128)).into();
 
     // ** Get The Token Balance for the amount_in to sell **
-    let amount_in_token = get_balance_of_evm(
-        pool.token_1, // shitcoin
-        get_snipe_contract_address(),
-        next_block,
-        &mut evm
+    let (real_amount, amount_from_swap) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event.clone(),
+        transfer_event.clone()
     )?;
+
+    // if the actual amount of tokens is less than 70% of the amount we should receive
+    // then we skip the token
+    if real_amount < (amount_from_swap * 7) / 10 {
+        return Err(anyhow!("Skipped Token, Buy Tax > 30%: {:?}", pool.token_1));
+    }
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
         pool.token_1, // shitcoin
         pool.token_0, // weth
         pool.address,
-        amount_in_token,
+        real_amount,
         U256::from(0u128)
     );
 
-    let is_sell_reverted = commit_tx_with_inspector(
+    let (is_sell_reverted, logs) = commit_tx_and_return_logs(
         &mut evm,
         call_data,
         next_block,
         &pool.token_1,
-        get_my_address() // caller
+        get_my_address(), // caller
+        true // apply state changes to db
     )?;
-
-    // get the post balance of weth
-    let final_amount_weth = get_balance_of_evm(
-        pool.token_0, // weth
-        get_snipe_contract_address(),
-        next_block,
-        &mut evm
-    )?;
-
-    if is_buy_reverted {
-        log::error!("Buy reverted after 200 blocks {:?}", pool.token_1);
-        return Ok(false);
-    }
 
     if is_sell_reverted {
         log::error!("Sell reverted after 200 blocks {:?}", pool.token_1);
         return Ok(false);
     }
 
-    // Check if the final WETH amount is less than 80% of the expected amount
-    if final_amount_weth < (amount_in_weth * 8) / 10 {
+    let (real_weth_amount, _) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event,
+        transfer_event.clone()
+    )?;
+
+    // if the actual amount of weth is less than 70% of the amount in weth
+    // then we skip the token
+    if real_weth_amount < (amount_in_weth * 7) / 10 {
         return Err(
-            anyhow!(
-                "Skipped Token after 200 blocks, we lost more than 20% in a buy/sell: {:?}",
-                pool.token_1
-            )
+            anyhow!("Skipped Token, Sell Tax > 30% (Detected from Logs): {:?}", pool.token_1)
         );
     }
 
+    // ** Passed All Checks **
     Ok(true)
 }
 
@@ -227,12 +257,12 @@ pub fn transfer_check(
         // first simulate and commit the pending tx so we can buy the token
         commit_pending_tx(&mut evm, &tx)?;
     }
-    // enable checks
-    evm.env.cfg.disable_base_fee = false;
-    evm.env.cfg.disable_block_gas_limit = false;
-    evm.env.cfg.disable_balance_check = false;
 
-    //** Buy The Token **
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
+
     // ** create the call_data for the swap
     let call_data = encode_swap(
         pool.token_0, // weth
@@ -242,12 +272,14 @@ pub fn transfer_check(
         U256::from(0u128)
     );
 
-    let _commit_tx = commit_tx_with_inspector(
+    //** Buy The Token **
+    let _commit_tx = commit_tx_and_return_logs(
         &mut evm,
         call_data,
         next_block,
         &pool.token_1,
-        get_my_address() // caller
+        get_my_address(), // caller
+        true // apply state changes to db
     )?;
 
     // ** Do Tranfer Check **
@@ -271,12 +303,13 @@ pub fn transfer_check(
         amount_in_token
     );
 
-    let _withdraw = commit_tx_with_inspector(
+    let _withdraw = commit_tx_and_return_logs(
         &mut evm,
         call_data,
         next_block,
         &pool.token_1,
-        get_admin_address() // caller
+        get_admin_address(), // caller
+        true // apply state changes to db
     )?;
 
     // get the post balance of admin (the address we sent the tokens)
@@ -287,9 +320,9 @@ pub fn transfer_check(
         &mut evm
     )?;
 
-    //** check if we lost more than 20% on the transfer */
-    if amount_token_in_admin < (amount_in_token * 8) / 10 {
-        return Err(anyhow!("We lost more than 20% on the transfer"));
+    //** check if we lost more than 30% on the transfer */
+    if amount_token_in_admin < (amount_in_token * 7) / 10 {
+        return Err(anyhow!("We lost more than 30% on the transfer"));
     }
 
     Ok(())
@@ -300,25 +333,29 @@ pub fn generate_buy_tx_data(
     amount_in_weth: U256,
     next_block: &BlockInfo,
     pending_tx: Option<Transaction>,
+    miner_tip: U256,
+    swap_event: Event,
+    transfer_event: Event,
     fork_db: ForkDB
 ) -> Result<SnipeTx, anyhow::Error> {
     let mut evm = revm::EVM::new();
-    evm.database(fork_db);
+    evm.database(fork_db.clone());
 
     // setup the next block state
     setup_block_state(&mut evm, next_block);
 
+    // if we have a pending tx simulate it
     if let Some(ref tx) = pending_tx {
         // first simulate and commit the pending tx so we can buy the token
         commit_pending_tx(&mut evm, tx)?;
     }
 
-    // enable checks
-    evm.env.cfg.disable_base_fee = false;
-    evm.env.cfg.disable_block_gas_limit = false;
-    evm.env.cfg.disable_balance_check = false;
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
 
-    // create the call_data for the swap
+    // ** create the call_data for the buy swap
     let call_data = encode_swap(
         pool.token_0, // weth
         pool.token_1, // shitcoin
@@ -327,20 +364,28 @@ pub fn generate_buy_tx_data(
         U256::from(0u128)
     );
 
-    // commit tx
-    let (access_list, gas_used) = commit_tx_with_access_list(&mut evm, call_data, next_block)?;
-
-    // get the balance of the token we bought
-    let token_balance = get_balance_of_evm(
-        pool.token_1, // shitcoin
-        get_snipe_contract_address(),
-        next_block,
-        &mut evm
+    // commit tx again to get the access list
+    let (access_list, gas_used, logs) = commit_tx_with_access_list(
+        &mut evm,
+        call_data,
+        next_block
     )?;
 
-    // 10% tolerance/slippage
-    // adjust this as you like
-    let expected_amount = (token_balance * 9) / 10;
+    // calculate total gas cost for the buy cost
+    let buy_cost = (next_block.base_fee + miner_tip) * gas_used;
+
+    // get the real amount of tokens received
+    let (token_balance, _) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event,
+        transfer_event
+    )?;
+
+    // 30% tolerance/slippage (minimum received)
+    // adjust this from helper.rs
+    let expected_amount =
+        (token_balance * U256::from(*BUY_NUMERATOR)) / U256::from(*BUY_DENOMINATOR);
 
     // create the call data again
     let call_data = encode_swap(
@@ -359,14 +404,19 @@ pub fn generate_buy_tx_data(
             get_snipe_contract_address(),
             access_list,
             gas_used,
+            buy_cost,
             *pool,
             amount_in_weth,
+            token_balance, // expected amount of tokens
             *TARGET_AMOUNT_TO_SELL,
             next_block.number,
             Some(tx.clone()),
             0, // zero attempts to sell
             0, // zero snipe retries
-            false // pending tx is false
+            false, // is pending false
+            false, // retry pending
+            0, // 0 means no reason
+            false // got initial out is false
         )
     )
 }
@@ -381,6 +431,11 @@ pub fn simulate_sell(
 
     // setup the next block state
     setup_block_state(&mut evm, &next_block);
+
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
 
     // ** get the token balance for the amount_in to sell
     let amount_in = get_balance_of_evm(
@@ -430,6 +485,8 @@ pub fn simulate_sell_after(
     tx: &Transaction,
     pool: Pool,
     next_block: BlockInfo,
+    swap_event: Event,
+    transfer_event: Event,
     fork_db: ForkDB
 ) -> Result<U256, anyhow::Error> {
     // setup an evm instance
@@ -440,12 +497,13 @@ pub fn simulate_sell_after(
     setup_block_state(&mut evm, &next_block);
 
     // simulate pending tx
+    // apply state changes
     let _commit_pending = commit_pending_tx(&mut evm, tx)?;
 
-    // enable checks
-    evm.env.cfg.disable_base_fee = false;
-    evm.env.cfg.disable_block_gas_limit = false;
-    evm.env.cfg.disable_balance_check = false;
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
 
     // ** Now Simulate The Sell Transaction
 
@@ -461,14 +519,6 @@ pub fn simulate_sell_after(
         log::error!("Anti-Honeypot ERROR contract doesnt have any balance for {:?}", pool.token_1);
     }
 
-    // ** Get The initial WETH Balance
-    let before_balance = get_balance_of_evm(
-        pool.token_0, // weth
-        get_snipe_contract_address(),
-        &next_block,
-        &mut evm
-    )?;
-
     // ** create the call_data for the swap
     let call_data = encode_swap(
         pool.token_1, // shitcoin
@@ -480,69 +530,31 @@ pub fn simulate_sell_after(
 
     // ** Simulate The Sell Transaction
 
-    // setup evm for swap
-    evm.env.tx.caller = get_my_address().into();
-    evm.env.tx.transact_to = TransactTo::Call(get_snipe_contract_address().0.into());
-    evm.env.tx.data = call_data.clone().into();
-    evm.env.tx.value = rU256::ZERO;
-    evm.env.tx.gas_limit = 1000000;
-    evm.env.tx.gas_price = next_block.base_fee.into();
-
-    let mut salmonella_inspector = SalmonellaInspectoooor::new();
-
-    let result = match evm.inspect_commit(&mut salmonella_inspector) {
-        Ok(res) => res,
-        Err(e) => {
-            return Err(anyhow!("Error when commiting sell tx: {:?}", e));
-        }
-    };
-
-    // match the inspector to see if token is safu
-    let mut is_safu = true;
-    match salmonella_inspector.is_safu() {
-        IsSafu::Safu => {/* continue */}
-        IsSafu::NotSafu(not_safu_opcodes) => {
-            log::error!(
-                "Token {:?} is not safu, found the following opcodes: {:?}",
-                pool.token_1,
-                not_safu_opcodes
-            );
-            is_safu = false;
-        }
-    }
-
-    // define a bool to check if the tx reverted
-    let reverted = match result {
-        ExecutionResult::Success { .. } => false,
-        ExecutionResult::Revert { .. } => true,
-        ExecutionResult::Halt { .. } => true,
-    };
-
-    // get the post balance of weth
-    let post_balance_weth = get_balance_of_evm(
-        pool.token_0, // weth
-        get_snipe_contract_address(),
+    let (reverted, logs) = commit_tx_and_return_logs(
+        &mut evm,
+        call_data,
         &next_block,
-        &mut evm
+        &pool.token_1,
+        get_my_address(), // caller
+        true // apply state changes to db
     )?;
 
-    // calculate the final amount of weth
-    let final_amount_weth = post_balance_weth.checked_sub(before_balance).unwrap_or_default();
-
-    // ** Check which txs are reverted
-    // if the token is not safu then return 0
-    if !is_safu {
-        log::error!("Token is not safu, returning 0");
-        return Ok(U256::zero());
-    }
-
-    // ** if our tx is reverted then return 0
+    // if the tx is reverted we return 0
+    // cause it will produce no logs
     if reverted {
-        log::error!("Our tx is reverted, returning 0");
+        log::warn!("Our tx is reverted, returning 0");
         return Ok(U256::zero());
-    } else {
-        return Ok(final_amount_weth);
     }
+
+    // ** get the actual amount of weth we are going to receive from the logs
+    let (weth_amount, _) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event,
+        transfer_event
+    )?;
+
+    return Ok(weth_amount);
 }
 
 pub fn generate_sell_tx_data(
@@ -555,6 +567,11 @@ pub fn generate_sell_tx_data(
 
     // setup the next block state
     setup_block_state(&mut evm, &next_block);
+
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
 
     // ** get the token balance for the amount_in to sell
 
@@ -583,7 +600,7 @@ pub fn generate_sell_tx_data(
     );
 
     // commit tx
-    let (access_list, gas_used) = commit_tx_with_access_list(
+    let (access_list, gas_used, _) = commit_tx_with_access_list(
         &mut evm,
         call_data.clone(),
         &next_block
@@ -606,6 +623,125 @@ pub fn generate_sell_tx_data(
         access_list,
         gas_used,
         expected_amount,
+        get_snipe_contract_address(),
+        Transaction::default(),
+        U256::from(2u128) // 2 because we dont do frontrun or backrun
+    );
+
+    Ok(tx_data)
+}
+
+pub fn profit_taker(
+    next_block: BlockInfo,
+    pool: Pool,
+    amount_in: U256,
+    swap_event: Event,
+    transfer_event: Event,
+    fork_db: ForkDB
+) -> Result<TxData, anyhow::Error> {
+    // setup an evm instance
+    let mut evm = revm::EVM::new();
+    evm.database(fork_db.clone());
+
+    // setup the next block state
+    setup_block_state(&mut evm, &next_block);
+
+    // disable checks
+    evm.env.cfg.disable_base_fee = true;
+    evm.env.cfg.disable_block_gas_limit = true;
+    evm.env.cfg.disable_balance_check = true;
+
+    // ** a simple way to find out how much tokens to sell
+    // ** is to simulate a buy transaction at the current state
+    // ** to see how much tokens we get and we will use that amount to sell
+
+    // ** create the call_data for the swap
+    let call_data = encode_swap(
+        get_weth_address(), // input
+        pool.token_1, // output
+        pool.address,
+        amount_in,
+        U256::from(0u128)
+    );
+
+    // commit tx and get the logs
+    let (_, logs) = commit_tx_and_return_logs(
+        &mut evm,
+        call_data,
+        &next_block,
+        &pool.token_1,
+        get_my_address(), // caller
+        false // dont apply state changes to db
+    )?;
+
+    // get the real amount of tokens we are going to receive
+    let (mut amount_of_tokens_to_sell, _) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event.clone(),
+        transfer_event.clone()
+    )?;
+
+    // encode the sell call data
+    let call_data = encode_swap(
+        pool.token_1, // input
+        get_weth_address(), // output
+        pool.address,
+        amount_of_tokens_to_sell,
+        U256::from(0u128)
+    );
+
+    // commit the sell tx
+    let (_, logs) = commit_tx_and_return_logs(
+        &mut evm,
+        call_data,
+        &next_block,
+        &pool.token_1,
+        get_my_address(), // caller
+        false // dont apply state changes to db
+    )?;
+
+    // get the amount of weth we are going to receive
+    let (real_amount_weth, _) = get_real_amount_from_logs(
+        logs,
+        pool.address,
+        swap_event,
+        transfer_event
+    )?;
+
+    // make sure the real_amount_weth is not less than the initial amount
+    // TODO implement a while loop and run the simulation again
+    if real_amount_weth < amount_in {
+        // increase the amount of tokens to sell by 5%
+        amount_of_tokens_to_sell = (amount_of_tokens_to_sell * 105) / 100;
+    }
+
+    // 15% slippage
+    let minimum_received = (real_amount_weth * 85) / 100;
+
+    // encode the final call data
+    // and generate accesslist
+    let call_data = encode_swap(
+        pool.token_1, // input
+        get_weth_address(), // output
+        pool.address,
+        amount_of_tokens_to_sell,
+        minimum_received
+    );
+
+    // commit tx
+    let (access_list, gas_used, _) = commit_tx_with_access_list(
+        &mut evm,
+        call_data.clone(),
+        &next_block
+    )?;
+
+    // ** generate TxData
+    let tx_data = TxData::new(
+        call_data.into(),
+        access_list,
+        gas_used,
+        minimum_received,
         get_snipe_contract_address(),
         Transaction::default(),
         U256::from(2u128) // 2 because we dont do frontrun or backrun
@@ -658,22 +794,6 @@ pub fn get_touched_pools(
                 .cloned()
         })
         .collect();
-
-    /* 
-    let output: Bytes = match res {
-        ExecutionResult::Success { output, .. } =>
-            match output {
-                Output::Call(o) => o.into(),
-                Output::Create(o, _) => o.into(),
-            }
-        ExecutionResult::Revert { output, .. } => {
-            return Err(anyhow!("Pending tx reverted: {:?}", output));
-        }
-        ExecutionResult::Halt { reason, .. } => {
-            return Err(anyhow!("Pending tx halted: {:?}", reason));
-        }
-    };
-    */
 
     // if the touched_pools vector is empty return None
     if touched_pools.is_empty() {

@@ -7,6 +7,7 @@ use crate::oracles::{
     block_oracle::{ BlockOracle, start_block_oracle },
     sell_oracle::start_sell_oracle,
     anti_rug_oracle::{ start_anti_rug, anti_honeypot },
+    nonce_oracle::start_nonce_oracle,
 };
 
 use super::bot_runner::{ snipe_retry, start_sniper };
@@ -61,6 +62,7 @@ impl BotConfig {
         let new_block_receiver_2 = new_block_sender.0.subscribe();
         let new_block_receiver_3 = new_block_sender.0.subscribe();
         let new_block_receiver_4 = new_block_sender.0.subscribe();
+        let new_block_receiver_5 = new_block_sender.0.subscribe();
 
         // new mempool event channel
         let new_mempool_sender = broadcast::channel::<MemPoolEvent>(1000); // buffer size 1000
@@ -72,9 +74,13 @@ impl BotConfig {
         let sell_oracle = Arc::new(Mutex::new(SellOracle::new()));
         let retry_oracle = Arc::new(Mutex::new(RetryOracle::new()));
         let anti_rug_oracle = Arc::new(Mutex::new(AntiRugOracle::new()));
+        let nonce_oracle = Arc::new(Mutex::new(NonceOracle::new()));
 
         // start the block oracle
         start_block_oracle(&mut self.block_oracle, new_block_sender.0.clone());
+
+        // start nonce oracle
+        start_nonce_oracle(nonce_oracle.clone(), new_block_receiver_5);
 
         // start oracle status
         oracle_status(
@@ -97,7 +103,8 @@ impl BotConfig {
             new_pair_receiver,
             sell_oracle.clone(),
             anti_rug_oracle.clone(),
-            retry_oracle.clone()
+            retry_oracle.clone(),
+            nonce_oracle.clone(),
         );
 
         // start the retry oracle
@@ -107,6 +114,7 @@ impl BotConfig {
             sell_oracle.clone(),
             anti_rug_oracle.clone(),
             retry_oracle.clone(),
+            nonce_oracle.clone(),
             new_block_receiver_3
         );
 
@@ -115,6 +123,7 @@ impl BotConfig {
             self.clone(),
             sell_oracle.clone(),
             anti_rug_oracle.clone(),
+            nonce_oracle.clone(),
             new_block_receiver_2
         );
 
@@ -123,6 +132,7 @@ impl BotConfig {
             self.clone(),
             anti_rug_oracle.clone(),
             sell_oracle.clone(),
+            nonce_oracle.clone(),
             new_mempool_receiver_2
         );
 
@@ -131,6 +141,7 @@ impl BotConfig {
             self.clone(),
             anti_rug_oracle.clone(),
             sell_oracle.clone(),
+            nonce_oracle.clone(),
             new_mempool_receiver_3
         );
         log::info!("All Oracles Started");

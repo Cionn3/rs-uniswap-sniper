@@ -2,7 +2,13 @@ use tokio::sync::broadcast::Sender;
 use ethers::prelude::*;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use crate::utils::helpers::{ create_local_client, convert_wei_to_ether, load_abi_from_file, MIN_WETH_RESERVE, MAX_WETH_RESERVE };
+use crate::utils::helpers::{
+    create_local_client,
+    convert_wei_to_ether,
+    load_abi_from_file,
+    MIN_WETH_RESERVE,
+    MAX_WETH_RESERVE,
+};
 use crate::utils::types::events::MemPoolEvent;
 use crate::utils::simulate::simulate::get_pair;
 use crate::bot::bot_config::BotConfig;
@@ -30,6 +36,10 @@ pub fn start_pair_oracle(
                 }
             };
 
+            // define transfer method
+            let transfer_id: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+            let approve: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
+
             // ** Load Burn and Sync events ABI
             let abi = load_abi_from_file("../../src/utils/abi/IUniswapV2Pair.abi").expect(
                 "Failed to load ABI"
@@ -52,12 +62,22 @@ pub fn start_pair_oracle(
             let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
 
             while let Ok(event) = new_mempool_receiver.recv().await {
-                let semaphore = semaphore.clone();
-                let client = client.clone();
-
                 let tx = match event {
                     MemPoolEvent::NewTx { tx } => tx,
                 };
+
+                if tx.input.0.len() >= 4 && tx.input.0[0..4] == transfer_id {
+                    // log::info!("skipped Tx with Transfer method: {:?}", tx.hash);
+                    continue;
+                }
+
+                if tx.input.0.len() >= 4 && tx.input.0[0..4] == approve {
+                    // log::info!("skipped Tx with Transfer method: {:?}", tx.hash);
+                    continue;
+                }
+
+                let semaphore = semaphore.clone();
+                let client = client.clone();
 
                 let next_block = {
                     let block_oracle = block_oracle.read().await;
@@ -119,7 +139,7 @@ pub fn start_pair_oracle(
                     // adjust these numbers as you like
                     if weth_reserve < *MIN_WETH_RESERVE {
                         log::error!(
-                            "Weth Reserve < Min Reserve {:?}",
+                            "Weth Reserve < {:?} ETH: {:?}", *MIN_WETH_RESERVE,
                             convert_wei_to_ether(weth_reserve)
                         );
                         return;
@@ -127,7 +147,7 @@ pub fn start_pair_oracle(
 
                     if weth_reserve > *MAX_WETH_RESERVE {
                         log::error!(
-                            "Weth Reserve > Max Reserve {:?}",
+                            "Weth Reserve > {:?} ETH: {:?}", *MAX_WETH_RESERVE,
                             convert_wei_to_ether(weth_reserve)
                         );
                         return;

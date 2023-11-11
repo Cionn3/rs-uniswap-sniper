@@ -29,7 +29,7 @@ impl BlockInfo {
     pub fn find_next_block_info(prev_block: Block<TxHash>) -> Self {
         let number = prev_block.number.unwrap_or_default() + 1;
         let timestamp = prev_block.timestamp + 12;
-        let base_fee = super::calculate_next_block_base_fee(prev_block);
+        let base_fee = calculate_next_block_base_fee(prev_block);
 
         Self {
             number,
@@ -71,7 +71,7 @@ impl BlockOracle {
         // next block info
         let number = number + 1;
         let timestamp = timestamp + 12;
-        let base_fee = super::calculate_next_block_base_fee(lb);
+        let base_fee = calculate_next_block_base_fee(lb);
 
         let next_block = BlockInfo::new(number, timestamp, base_fee);
 
@@ -96,7 +96,7 @@ impl BlockOracle {
     // Updates block's base fee
     pub fn update_base_fee(&mut self, latest_block: Block<TxHash>) {
         self.latest_block.base_fee = latest_block.base_fee_per_gas.unwrap_or_default();
-        self.next_block.base_fee = super::calculate_next_block_base_fee(latest_block);
+        self.next_block.base_fee = calculate_next_block_base_fee(latest_block);
     }
 }
 
@@ -146,4 +146,33 @@ pub fn start_block_oracle(
             }
         }
     });
+}
+
+
+/// Calculate the next block base fee
+// based on math provided here: https://ethereum.stackexchange.com/questions/107173/how-is-the-base-fee-per-gas-computed-for-a-new-block
+fn calculate_next_block_base_fee(block: Block<TxHash>) -> U256 {
+    // Get the block base fee per gas
+    let current_base_fee_per_gas = block.base_fee_per_gas.unwrap_or_default();
+
+    // Get the mount of gas used in the block
+    let current_gas_used = block.gas_used;
+
+    let current_gas_target = block.gas_limit / 2;
+
+    if current_gas_used == current_gas_target {
+        current_base_fee_per_gas
+    } else if current_gas_used > current_gas_target {
+        let gas_used_delta = current_gas_used - current_gas_target;
+        let base_fee_per_gas_delta =
+            current_base_fee_per_gas * gas_used_delta / current_gas_target / 8;
+
+        return current_base_fee_per_gas + base_fee_per_gas_delta;
+    } else {
+        let gas_used_delta = current_gas_target - current_gas_used;
+        let base_fee_per_gas_delta =
+            current_base_fee_per_gas * gas_used_delta / current_gas_target / 8;
+
+        return current_base_fee_per_gas - base_fee_per_gas_delta;
+    }
 }

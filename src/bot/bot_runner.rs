@@ -21,15 +21,13 @@ pub fn start_sniper(
     mut new_pair_receiver: broadcast::Receiver<NewPairEvent>,
     sell_oracle: Arc<Mutex<SellOracle>>,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    retry_oracle: Arc<Mutex<RetryOracle>>
+    retry_oracle: Arc<Mutex<RetryOracle>>,
+    nonce_oracle: Arc<Mutex<NonceOracle>>
 ) {
     tokio::spawn(async move {
         while let Ok(event) = new_pair_receiver.recv().await {
             match event {
                 NewPairEvent::NewPairWithTx { pool, tx } => {
-                    // log::info!("Received new pool event: {:?}", pool);
-                    // log::info!("Received pending tx event: {:?}", tx);
-
                     // process the tx
                     match
                         process_tx(
@@ -38,7 +36,8 @@ pub fn start_sniper(
                             tx,
                             sell_oracle.clone(),
                             anti_rug_oracle.clone(),
-                            retry_oracle.clone()
+                            retry_oracle.clone(),
+                            nonce_oracle.clone()
                         ).await
                     {
                         Ok(_) => log::info!("Tx Sent Successfully"),
@@ -57,7 +56,8 @@ async fn process_tx(
     pending_tx: Transaction,
     sell_oracle: Arc<Mutex<SellOracle>>,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    retry_oracle: Arc<Mutex<RetryOracle>>
+    retry_oracle: Arc<Mutex<RetryOracle>>,
+    nonce_oracle: Arc<Mutex<NonceOracle>>
 ) -> Result<(), anyhow::Error> {
     let client = bot_config.client.clone();
     let block_oracle = bot_config.block_oracle.clone();
@@ -69,8 +69,6 @@ async fn process_tx(
         block_oracle.next_block.clone()
     };
 
-    // prepare for simulations
-
     // get the latest blockId
     let latest_block = client.get_block_number().await.unwrap();
     let latest_block = Some(BlockId::Number(BlockNumber::Number(latest_block)));
@@ -81,6 +79,7 @@ async fn process_tx(
     // setup fork factory backend
     let fork_factory = ForkFactory::new_sandbox_factory(client.clone(), cache_db, latest_block);
 
+
     // simulate the tx
     let is_swap_success = match
         tax_check(
@@ -88,6 +87,8 @@ async fn process_tx(
             amount_in.clone(),
             &next_block,
             Some(pending_tx.clone()),
+            TRANSFER_EVENT.clone(),
+            SWAP_EVENT.clone(),
             fork_factory.new_sandbox_fork()
         )
     {
@@ -103,16 +104,21 @@ async fn process_tx(
         let snipe_tx = SnipeTx {
             pool: pool,
             amount_in: amount_in,
+            expected_amount_of_tokens: U256::zero(),
             target_amount_weth: bot_config.target_amount_to_sell,
             tx_call_data: Bytes::new(),
             access_list: AccessList::default(),
             gas_used: 0u64,
+            buy_cost: U256::zero(),
             sniper_contract_address: Address::zero(),
             pending_tx: pending_tx.clone(),
             block_bought: next_block.number,
             attempts_to_sell: 0u8, // attempts to sell
             snipe_retries: 0u8, // snipe retries
-            tx_is_pending: false,
+            is_pending: false,
+            retry_pending: false, // retry pending
+            reason: 1u8, // 1 means swap failed
+            got_initial_out: false,
         };
         // push it to retry oracle
         let mut retry_oracle = retry_oracle.lock().await;
@@ -137,6 +143,8 @@ async fn process_tx(
         }
     };
 
+    log::info!("Sniping with miner tip: {:?}", convert_wei_to_gwei(*MINER_TIP_TO_SNIPE));
+
     // simulate the tx once again and generate accesslist
 
     let snipe_tx = match
@@ -145,6 +153,9 @@ async fn process_tx(
             amount_in,
             &next_block,
             Some(pending_tx.clone()),
+            *MINER_TIP_TO_SNIPE,
+            SWAP_EVENT.clone(),
+            TRANSFER_EVENT.clone(),
             fork_factory.new_sandbox_fork()
         )
     {
@@ -155,14 +166,8 @@ async fn process_tx(
         }
     };
 
-    // if the tx is legacy should return 0
-    // let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
-
-    let miner_tip = *MINER_TIP_TO_SNIPE;
-    log::info!("Sniping with miner tip: {:?}", convert_wei_to_gwei(miner_tip));
-
     // ** max fee per gas must always be higher than base fee
-    let max_fee_per_gas = next_block.base_fee + miner_tip;
+    let max_fee_per_gas = next_block.base_fee + *MINER_TIP_TO_SNIPE;
 
     let expected_amount = U256::zero();
 
@@ -178,15 +183,14 @@ async fn process_tx(
     };
 
     // ** calculate the total gas cost
-    let total_gas_cost = (next_block.base_fee + miner_tip) * tx_data.gas_used;
+    let total_gas_cost = (next_block.base_fee + *MINER_TIP_TO_SNIPE) * tx_data.gas_used;
 
     // ** If gas cost is more than amount_in we dont snipe
     // you can remove this check if you want to snipe anyway
-    if total_gas_cost > snipe_tx.amount_in {
+    if total_gas_cost > snipe_tx.amount_in * 2 {
         return Err(anyhow!("Gas Cost Is Higher Than Amount In"));
     }
 
-    // ** Send The Tx To Flashbots **
     log::info!("Token {:?} Passed All Checks! 🚀", pool.token_1);
 
     // send the new tx to oracles before sending to flashbots
@@ -194,22 +198,25 @@ async fn process_tx(
     // We dont want to get rugged while we wait
 
     // add the snipe_tx to oracles
-    let mut sell_oracle_guard = sell_oracle.lock().await;
-    sell_oracle_guard.add_tx_data(snipe_tx.clone());
-    drop(sell_oracle_guard);
+    add_tx_to_oracles(sell_oracle.clone(), anti_rug_oracle.clone(), snipe_tx.clone()).await;
 
-    let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
-    anti_rug_oracle_guard.add_tx_data(snipe_tx.clone());
-    drop(anti_rug_oracle_guard);
+    // get the nonce and update it
+    let mut nonce_guard = nonce_oracle.lock().await;
+    let nonce = nonce_guard.get_nonce();
+    nonce_guard.update_nonce(nonce + 1);
+    drop(nonce_guard);
+
     log::info!("Token {:?} Sent To Oracles! 🚀", pool.token_1);
 
+    // ** Send The Tx To Flashbots **
     let is_bundle_included = match
         send_tx(
             client.clone(),
             tx_data.clone(),
             next_block.clone(),
-            miner_tip,
-            max_fee_per_gas
+            *MINER_TIP_TO_SNIPE,
+            max_fee_per_gas,
+            nonce
         ).await
     {
         Ok(result) => result,
@@ -223,18 +230,15 @@ async fn process_tx(
     // if the bundle is not included
     if is_bundle_included == false {
         // remove the snipe_tx from the oracles
-        let mut sell_oracle_guard = sell_oracle.lock().await;
-        sell_oracle_guard.remove_tx_data(snipe_tx.clone());
-        drop(sell_oracle_guard);
-        let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
-        anti_rug_oracle_guard.remove_tx_data(snipe_tx.clone());
-        drop(anti_rug_oracle_guard);
+        remove_tx_from_oracles(
+            sell_oracle.clone(),
+            anti_rug_oracle.clone(),
+            snipe_tx.clone()
+        ).await;
         log::info!("Token {:?} Removed From Oracles! 🚀", pool.token_1);
 
-        // and push it to retry oracle
-        let mut retry_oracle = retry_oracle.lock().await;
-        retry_oracle.add_tx_data(snipe_tx.clone());
-        log::info!("Token {:?} Sent To Retry Oracle! 🚀", pool.token_1);
+        // if our tx is not included its better to remove it and move on
+        // as it is possible to get a really bad position and get wrecked most of the times
 
         return Err(anyhow!("Bundle Not Included"));
     }
@@ -247,6 +251,7 @@ pub fn snipe_retry(
     sell_oracle: Arc<Mutex<SellOracle>>,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
     retry_oracle: Arc<Mutex<RetryOracle>>,
+    nonce_oracle: Arc<Mutex<NonceOracle>>,
     mut new_block_receive: broadcast::Receiver<NewBlockEvent>
 ) {
     tokio::spawn(async move {
@@ -294,7 +299,7 @@ pub fn snipe_retry(
 
                 for tx in snipe_txs {
                     // if the tx is pending skip
-                    if tx.tx_is_pending {
+                    if tx.retry_pending {
                         continue;
                     }
                     // if we reached the retry limit remove tx from oracles
@@ -303,16 +308,21 @@ pub fn snipe_retry(
                         let mut retry_oracle = retry_oracle.lock().await;
                         retry_oracle.remove_tx_data(tx.clone());
                         drop(retry_oracle);
-                        log::warn!("Retries >= 10, Removed tx from oracles");
+                        log::warn!("Retries >={:?}, Removed tx from retry oracle", *MAX_SNIPE_RETRIES);
                         continue;
                     }
 
                     let sell_oracle = sell_oracle.clone();
                     let anti_rug_oracle = anti_rug_oracle.clone();
                     let retry_oracle = retry_oracle.clone();
+                    let nonce_oracle = nonce_oracle.clone();
 
                     let client = client.clone();
-                    let amount_in = bot_config.initial_amount_in_weth;
+
+                    // usually when a buy is reverted is because of max buy size (can also be due to trading is not open yet)
+                    // TODO find a way to understand the real reason why the tx reverted
+                    // if for example is due to max buy size we can just lower the amount in and try again
+                    // let amount_in = *INITIAL_AMOUNT_IN_WETH / 2;
                     let next_block = next_block.clone();
 
                     // initialize cache db
@@ -338,9 +348,11 @@ pub fn snipe_retry(
                         let swap = match
                             tax_check(
                                 &tx.pool,
-                                amount_in,
+                                *INITIAL_AMOUNT_IN_WETH,
                                 &next_block,
                                 None,
+                                TRANSFER_EVENT.clone(),
+                                SWAP_EVENT.clone(),
                                 fork_factory.new_sandbox_fork()
                             )
                         {
@@ -368,7 +380,7 @@ pub fn snipe_retry(
                         let _transfer_result = match
                             transfer_check(
                                 &tx.pool,
-                                amount_in,
+                                *INITIAL_AMOUNT_IN_WETH,
                                 &next_block,
                                 None,
                                 fork_factory.new_sandbox_fork()
@@ -390,9 +402,12 @@ pub fn snipe_retry(
                         let snipe_tx = match
                             generate_buy_tx_data(
                                 &tx.pool,
-                                amount_in,
+                                *INITIAL_AMOUNT_IN_WETH,
                                 &next_block,
                                 None,
+                                *MINER_TIP_TO_SNIPE_RETRY,
+                                SWAP_EVENT.clone(),
+                                TRANSFER_EVENT.clone(),
                                 fork_factory.new_sandbox_fork()
                             )
                         {
@@ -405,6 +420,14 @@ pub fn snipe_retry(
 
                         // change the miner tip as you like
                         let miner_tip = *MINER_TIP_TO_SNIPE_RETRY;
+
+                        if tx.reason == 2u8 {
+                            let mut retry_oracle_guard = retry_oracle.lock().await;
+                            retry_oracle_guard.remove_tx_data(tx.clone());
+                            drop(retry_oracle_guard);
+                            log::info!("Removed from retry oracle due to bundle not included");
+                            return;
+                        }
 
                         // ** max fee per gas must always be higher than miner tip
                         let max_fee_per_gas = next_block.base_fee + miner_tip;
@@ -434,19 +457,24 @@ pub fn snipe_retry(
                         }
 
                         // add the snipe_tx to oracles
-                        let mut sell_oracle_guard = sell_oracle.lock().await;
-                        sell_oracle_guard.add_tx_data(snipe_tx.clone());
-                        drop(sell_oracle_guard);
+                        add_tx_to_oracles(
+                            sell_oracle.clone(),
+                            anti_rug_oracle.clone(),
+                            snipe_tx.clone()
+                        ).await;
 
-                        let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
-                        anti_rug_oracle_guard.add_tx_data(snipe_tx.clone());
-                        drop(anti_rug_oracle_guard);
-                        log::info!("Retry Oracle: Sent Tx To Oracles! 🚀");
-
-                        // set the tx as pending so we dont have any confilcts in the next iteration
+                        // set tx to retry pennding true
                         let mut retry_oracle_guard = retry_oracle.lock().await;
                         retry_oracle_guard.set_tx_is_pending(tx.clone(), true);
                         drop(retry_oracle_guard);
+
+                        // get the nonce and update it
+                        let mut nonce_guard = nonce_oracle.lock().await;
+                        let nonce = nonce_guard.get_nonce();
+                        nonce_guard.update_nonce(nonce + 1);
+                        drop(nonce_guard);
+
+                        log::info!("Retry Oracle: Sent Tx To Oracles! 🚀");
 
                         let is_bundle_included = match
                             send_tx(
@@ -454,7 +482,8 @@ pub fn snipe_retry(
                                 tx_data.clone(),
                                 next_block.clone(),
                                 miner_tip,
-                                max_fee_per_gas
+                                max_fee_per_gas,
+                                nonce
                             ).await
                         {
                             Ok(result) => result,
@@ -478,15 +507,22 @@ pub fn snipe_retry(
 
                             // update the pending status to false
                             retry_oracle_guard.set_tx_is_pending(tx.clone(), false);
+
+                            // if we fail to snipe the token the 2nd time
+                            // its better to remove it and move on
+                            // as it is possible to get a really bad position and get wrecked most of the times
+                            if tx.reason == 2u8 {
+                                retry_oracle_guard.remove_tx_data(tx.clone());
+                            }
+                            retry_oracle_guard.update_reason(tx.clone(), 2);
                             drop(retry_oracle_guard);
 
                             // remove the tx from oracles so we dont get bombarded with logs
-                            let mut sell_oracle = sell_oracle.lock().await;
-                            sell_oracle.remove_tx_data(snipe_tx.clone());
-                            drop(sell_oracle);
-                            let mut anti_rug_oracle = anti_rug_oracle.lock().await;
-                            anti_rug_oracle.remove_tx_data(snipe_tx.clone());
-                            drop(anti_rug_oracle);
+                            remove_tx_from_oracles(
+                                sell_oracle.clone(),
+                                anti_rug_oracle.clone(),
+                                tx.clone()
+                            ).await;
                             log::warn!("Bundle Not Included");
                             return;
                         }

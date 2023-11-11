@@ -1,51 +1,97 @@
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::str::FromStr;
 use ethers::{ prelude::*, types::transaction::eip2718::TypedTransaction };
 use ethers::types::transaction::eip2930::{ AccessList, AccessListItem };
+use crate::forked_db::fork_db::ForkDB;
+use crate::utils::simulate::get_token_balance;
+use crate::oracles::block_oracle::BlockInfo;
+use crate::utils::types::structs::{ SellOracle, AntiRugOracle, SnipeTx };
+
 use revm::primitives::{ U256 as rU256, B160 as rAddress };
 use bigdecimal::BigDecimal;
 use std::fs;
 use sha3::{ Digest, Keccak256 };
 use lazy_static::lazy_static;
 
+// transfer event abi
+const TRANSFER_EVENT_ABI: &str =
+    "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"value\",\"type\":\"uint256\"}],\"name\":\"Transfer\",\"type\":\"event\"}]";
+
 lazy_static! {
     pub static ref WETH: Address = get_weth_address();
 
-    // change these numbers as you like
+    // ** BOT SETTINGS **
 
-    // amount of eth to use for the snipe
-    // 0.01 eth
-    pub static ref INITIAL_AMOUNT_IN_WETH: U256 = U256::from(10000000000000000u128);
+    // change these settings as you like
 
-    // amount of eth to get from the trade
-    // 0.05 eth = 5x
-    pub static ref TARGET_AMOUNT_TO_SELL: U256 = U256::from(50000000000000000u128);
+    // ** BUY SLIPPAGE SETTINGS **
+    // chnage numerator to adjust slippage
+    // 7 is for 30% slippage
+    // for example if you want 20% slippage change it to 8 and so on
+    pub static ref BUY_NUMERATOR: u128 = 7;
+    pub static ref BUY_DENOMINATOR: u128 = 10;
 
-    // miner tip to use for the snipe
+
+    // Amount In to snipe
+    // 0.025 eth
+    pub static ref INITIAL_AMOUNT_IN_WETH: U256 = U256::from(25000000000000000u128);
+
+    // target amount to sell in eth
+    // 0.6 eth = 24x
+    pub static ref TARGET_AMOUNT_TO_SELL: U256 = U256::from(600000000000000000u128);
+
+    // how many xs the token must do in order to get
+    // the initial amount back
+    // default is 5 which the price must pump 5x
+    // if you dont want to take your initial out just put a very high number here
+    pub static ref INITIAL_PROFIT_TAKE: U256 = U256::from(5u128);
+
+    // miner tip to snipe
+    // default is 100 gwei
+    pub static ref MINER_TIP_TO_SNIPE: U256 = U256::from(100000000000u128);
+
+    // miner tip when we retry
+    // 50 gwei
+    pub static ref MINER_TIP_TO_SNIPE_RETRY: U256 = U256::from(50000000000u128);
+    
+    // miner tip to use when selling
     // 10 gwei
-    pub static ref MINER_TIP_TO_SNIPE: U256 = U256::from(10000000000u128); 
-
-    // miner tip to use when we retry to snipe
-    // 3 gwei
-    pub static ref MINER_TIP_TO_SNIPE_RETRY: U256 = U256::from(3000000000u128); 
-
-    // miner tip to use when we sell
-    // 3 gwei
-    pub static ref MINER_TIP_TO_SELL: U256 = U256::from(3000000000u128);
+    pub static ref MINER_TIP_TO_SELL: U256 = U256::from(10000000000u128);
 
     // how many times we try to sell before we remove the token from the sell oracle
-    pub static ref MAX_SELL_ATTEMPTS: u8 = 5;
+    pub static ref MAX_SELL_ATTEMPTS: u8 = 20;
 
     // how many times we retry to buy a token before we remove it from the retry oracle
-    pub static ref MAX_SNIPE_RETRIES: u8 = 10; 
+    pub static ref MAX_SNIPE_RETRIES: u8 = 3;
 
     // minimum weth reserve for a new pair
     // default is 1 eth
     pub static ref MIN_WETH_RESERVE: U256 = U256::from(1000000000000000000u128);
 
     // maximum weth reserve for a new pair
-    // default is 7 eth
-    pub static ref MAX_WETH_RESERVE: U256 = U256::from(7000000000000000000u128);
+    // default is 4 eth
+    pub static ref MAX_WETH_RESERVE: U256 = U256::from(4000000000000000000u128);
+
+
+    // ** other constants
+
+    pub static ref TRANSFER_EVENT: ethabi::Event = {
+        let load_transfer_event = ethabi::Contract::load(TRANSFER_EVENT_ABI.as_bytes()).unwrap();
+        let transfer_event = load_transfer_event.event("Transfer").unwrap();
+        transfer_event.clone()
+    };
+
+    pub static ref SWAP_EVENT: ethabi::Event = {
+        let v2_pair_abi = load_abi_from_file("../../src/utils/abi/IUniswapV2Pair.abi").expect(
+            "Failed to load ABI"
+        );
+        let v2_pair_contract = ethabi::Contract
+            ::load(v2_pair_abi.as_bytes())
+            .expect("Failed to load contract");
+        let swap_event = v2_pair_contract.event("Swap").expect("Failed to extract Swap event");
+        swap_event.clone()
+    };
 }
 
 // address to call contract from (SWAP_USER)
@@ -133,6 +179,42 @@ pub fn load_abi_from_file(file_path: &str) -> Result<String, Box<dyn std::error:
     Ok(content)
 }
 
+// helper function for sell oracle
+// checks the position we got
+// and adjust target sell price accordingly
+pub async fn check_position(
+    initial_amount_in: U256,
+    next_block: &BlockInfo,
+    token: Address,
+    sell_oracle: Arc<Mutex<SellOracle>>,
+    snipe_tx: SnipeTx,
+    fork_db: ForkDB
+) -> Result<(), anyhow::Error> {
+    // get the token balance
+    let token_balance = get_token_balance(
+        token,
+        get_snipe_contract_address(),
+        &next_block,
+        fork_db
+    )?;
+
+    // if the token_balance is less than 40% of expected amount
+    // we assume that we got a bad position
+    if token_balance < (snipe_tx.expected_amount_of_tokens * 6) / 10 {
+        // set the target_amount_weth to 3x
+       let target_amount_weth = (initial_amount_in * 30) / 10;
+        // update the target_amount_weth in the oracle
+        let mut oracle_guard = sell_oracle.lock().await;
+        oracle_guard.update_target_amount(snipe_tx.clone(), target_amount_weth);
+        drop(oracle_guard);
+        log::warn!("Got a bad position, changed target amount to 3x");
+        Ok(())
+    } else {
+        log::info!("Position is good");
+        Ok(())
+    }
+}
+
 /// Sign eip1559 transactions
 pub async fn sign_eip1559(
     tx: Eip1559TransactionRequest,
@@ -197,23 +279,23 @@ pub fn calculate_miner_tip(pending_tx_priority_fee: U256) -> U256 {
         }
         // if pending fee is between  0 ish and 0.1 gwei
         fee if fee < point_one_gwei => {
-            miner_tip = fee * 100; // maximum 10 gwei
+            miner_tip = fee * 200; // maximum 20 gwei
         }
-        // if pending fee is between 0.1 and 1 gwei
-        fee if fee > point_one_gwei && fee < point_five_gwei => {
-            miner_tip = fee * 25; // maximum 10 gwei
+        // if pending fee is between 0.1 and 0.5 gwei
+        fee if fee >= point_one_gwei && fee < point_five_gwei => {
+            miner_tip = fee * 50; // maximum 25 gwei
         }
         // if fee is between 0.5 and 1 gwei
-        fee if fee > point_five_gwei && fee < one_gwei => {
-            miner_tip = fee * 15; // maximum 15 gwei
+        fee if fee >= point_five_gwei && fee < one_gwei => {
+            miner_tip = fee * 20; // maximum 20 gwei
         }
-        // if pending fee is between 1 and 3 gwei
-        fee if fee > one_gwei && fee < two_gwei => {
-            miner_tip = fee * 7; // maximum 21 gwei
+        // if pending fee is between 1 and 2 gwei
+        fee if fee >= one_gwei && fee < two_gwei => {
+            miner_tip = fee * 10; // maximum 20 gwei
         }
         // if fee is between 2 and 3 gwei
-        fee if fee > two_gwei && fee < three_gwei => {
-            miner_tip = fee * 5; // maximum 15 gwei
+        fee if fee >= two_gwei && fee < three_gwei => {
+            miner_tip = fee * 10; // maximum 30 gwei
         }
         // for anything else
         _ => {
@@ -275,4 +357,30 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
     let mut output = [0u8; 32];
     output.copy_from_slice(&result);
     output
+}
+
+pub async fn remove_tx_from_oracles(
+    sell_oracle: Arc<Mutex<SellOracle>>,
+    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
+    snipe_tx: SnipeTx
+) {
+    let mut sell_oracle_guard = sell_oracle.lock().await;
+    sell_oracle_guard.remove_tx_data(snipe_tx.clone());
+    drop(sell_oracle_guard);
+    let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+    anti_rug_oracle_guard.remove_tx_data(snipe_tx.clone());
+    drop(anti_rug_oracle_guard);
+}
+
+pub async fn add_tx_to_oracles(
+    sell_oracle: Arc<Mutex<SellOracle>>,
+    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
+    snipe_tx: SnipeTx
+) {
+    let mut sell_oracle_guard = sell_oracle.lock().await;
+    sell_oracle_guard.add_tx_data(snipe_tx.clone());
+    drop(sell_oracle_guard);
+    let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
+    anti_rug_oracle_guard.add_tx_data(snipe_tx.clone());
+    drop(anti_rug_oracle_guard);
 }

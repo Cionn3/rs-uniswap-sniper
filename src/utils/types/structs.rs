@@ -43,14 +43,19 @@ pub struct SnipeTx {
     pub sniper_contract_address: Address,
     pub access_list: AccessList,
     pub gas_used: u64,
+    pub buy_cost: U256,
     pub pool: Pool,
     pub amount_in: U256,
+    pub expected_amount_of_tokens: U256,
     pub target_amount_weth: U256,
     pub block_bought: U64,
     pub pending_tx: Transaction,
     pub snipe_retries: u8,
     pub attempts_to_sell: u8,
-    pub tx_is_pending: bool,
+    pub is_pending: bool,
+    pub retry_pending: bool,
+    pub reason: u8,
+    pub got_initial_out: bool,
 }
 
 impl SnipeTx {
@@ -59,28 +64,38 @@ impl SnipeTx {
         sniper_contract_address: Address,
         access_list: AccessList,
         gas_used: u64,
+        buy_cost: U256,
         pool: Pool,
         amount_in: U256,
+        expected_amount_of_tokens: U256,
         target_amount_weth: U256,
         block_bought: U64,
         pending_tx: Option<Transaction>,
         snipe_retries: u8,
         attempts_to_sell: u8,
-        tx_is_pending: bool
+        is_pending: bool,
+        retry_pending: bool,
+        reason: u8,
+        got_initial_out: bool
     ) -> Self {
         SnipeTx {
             tx_call_data,
             sniper_contract_address,
             access_list,
             gas_used,
+            buy_cost,
             pool,
             amount_in,
+            expected_amount_of_tokens,
             target_amount_weth,
             block_bought,
             pending_tx: pending_tx.unwrap_or_default(),
             snipe_retries,
             attempts_to_sell,
-            tx_is_pending,
+            is_pending,
+            retry_pending,
+            reason,
+            got_initial_out,
         }
     }
 }
@@ -105,6 +120,29 @@ impl Pool {
             token_1,
             weth_liquidity,
         }
+    }
+}
+
+// Nonce Oracle, Holds the nonce for the next transaction
+// Before we send any tx we notify the oracle to update the nonce
+#[derive(Debug, Clone, PartialEq)]
+pub struct NonceOracle {
+    pub nonce: U256,
+}
+
+impl NonceOracle {
+    pub fn new() -> Self {
+        NonceOracle { nonce: U256::zero() }
+    }
+
+    // updates the nonce
+    pub fn update_nonce(&mut self, nonce: U256) {
+        self.nonce = nonce;
+    }
+
+    // get the current nonce
+    pub fn get_nonce(&self) -> U256 {
+        self.nonce
     }
 }
 
@@ -145,12 +183,33 @@ impl SellOracle {
             }
         }
     }
+
+    // set the tx if its pending or not
+    pub fn set_tx_is_pending(&mut self, snipe_tx: SnipeTx, tx_is_pending: bool) {
+        for tx in &mut self.tx_data {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
+                tx.retry_pending = tx_is_pending;
+                log::info!("Tx Set to {:?}", tx_is_pending);
+            }
+        }
+    }
+
     // Updates the retries counter
     pub fn update_attempts_to_sell(&mut self, snipe_tx: SnipeTx) {
         for tx in &mut self.tx_data {
             if tx.pool.token_1 == snipe_tx.pool.token_1 {
                 tx.attempts_to_sell += 1;
                 log::warn!("Sell Oracle: Updated retry counter to: {:?}", tx.attempts_to_sell);
+            }
+        }
+    }
+
+    // updates whether we have got the initial out as profit
+    pub fn update_got_initial_out(&mut self, snipe_tx: SnipeTx, got_initial_out: bool) {
+        for tx in &mut self.tx_data {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
+                tx.got_initial_out = got_initial_out;
+                log::warn!("Sell Oracle: Updated got_initial_out to: {:?}", tx.got_initial_out);
             }
         }
     }
@@ -216,11 +275,24 @@ impl RetryOracle {
         }
     }
 
+    // update the reason why the swap failed
+    // 0 = no reason (default when SnipeTx is created)
+    // 1 = swap failed (probably trading is not open yet)
+    // 2 = bundle not included (probably due to competition)
+    pub fn update_reason(&mut self, snipe_tx: SnipeTx, reason: u8) {
+        for tx in &mut self.tx_data {
+            if tx.pool.token_1 == snipe_tx.pool.token_1 {
+                tx.reason = reason;
+                log::warn!("Retry Oracle: Updated reason to: {:?}", tx.reason);
+            }
+        }
+    }
+
     // set the tx if its pending or not
     pub fn set_tx_is_pending(&mut self, snipe_tx: SnipeTx, tx_is_pending: bool) {
         for tx in &mut self.tx_data {
             if tx.pool.token_1 == snipe_tx.pool.token_1 {
-                tx.tx_is_pending = tx_is_pending;
+                tx.retry_pending = tx_is_pending;
                 log::info!("Tx Set to {:?}", tx_is_pending);
             }
         }

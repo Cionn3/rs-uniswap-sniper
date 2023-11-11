@@ -11,7 +11,6 @@ use crate::utils::helpers::{
     get_my_wallet,
     get_flashbot_identity,
     get_flashbot_searcher,
-    get_nonce,
     sign_eip1559,
 };
 
@@ -20,7 +19,8 @@ pub async fn send_tx(
     tx_data: TxData,
     next_block: BlockInfo,
     miner_tip: U256,
-    max_fee_per_gas: U256
+    max_fee_per_gas: U256,
+    nonce: U256,
 ) -> Result<bool, anyhow::Error> {
     let my_wallet = get_my_wallet();
     let my_address = get_my_address();
@@ -30,14 +30,7 @@ pub async fn send_tx(
     // flashbot searcher signer, must be the same private key as the wallet used to sign the tx
     let flashbot_searcher_signer = get_flashbot_searcher();
 
-    let nonce: Option<U256> = match get_nonce(client.clone(), my_address).await {
-        Ok(Some(nonce)) => Some(U256::from(nonce)), // Convert u64 to U256 here
-        Ok(None) => None,
-        Err(e) => {
-            log::info!("Error getting nonce: {}", e);
-            None // Return a default value
-        }
-    };
+
 
     // 500k gas limit, way more than enough for a swap
     let gas_limit = U256::from(500000u128);
@@ -50,7 +43,7 @@ pub async fn send_tx(
         max_priority_fee_per_gas: Some(miner_tip),
         max_fee_per_gas: Some(max_fee_per_gas),
         gas: Some(gas_limit),
-        nonce: nonce,
+        nonce: Some(nonce),
         value: Some(U256::zero()),
         access_list: tx_data.access_list.clone(),
     };
@@ -94,7 +87,7 @@ pub async fn send_tx(
                 let simulated_bundle = flashbots_client.inner().simulate_bundle(&bundle).await;
 
                 match simulated_bundle {
-                    Ok(sim_result) => {
+                    Ok(_sim_result) => {
                        // log::info!("Simulated Bundle Result: {:?}", sim_result);
                     }
                     Err(e) => {
@@ -241,7 +234,8 @@ fn get_all_urls() -> Vec<Url> {
         "https://builder.gmbit.co/rpc",
         "https://mev.api.blxrbdn.com/",
         "https://boba-builder.com/searcher/",
-        "https://blockbeelder.com/rpc"
+        "https://blockbeelder.com/rpc",
+        "https://rpc.lokibuilder.xyz"
     ];
 
     let mut urls: Vec<Url> = vec![];

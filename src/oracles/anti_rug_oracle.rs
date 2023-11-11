@@ -1,19 +1,11 @@
 use tokio::sync::broadcast;
 
-use crate::utils::helpers::get_admin_address;
-use crate::utils::helpers::get_my_address;
-
 use ethers::prelude::*;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use revm::db::{ CacheDB, EmptyDB };
-use crate::utils::helpers::{
-    create_local_client,
-    convert_wei_to_ether,
-    convert_wei_to_gwei,
-    calculate_miner_tip,
-};
-use crate::bot::send_normal_tx::send_normal_tx;
+use crate::utils::helpers::*;
+use crate::bot::send_tx::send_tx;
 use crate::utils::simulate::simulate::{
     simulate_sell,
     simulate_sell_after,
@@ -23,15 +15,13 @@ use crate::utils::simulate::simulate::{
 use crate::utils::simulate::insert_pool_storage;
 use crate::forked_db::fork_factory::ForkFactory;
 use crate::bot::bot_config::BotConfig;
-use crate::utils::types::{structs::*, events::*};
-
-
-
+use crate::utils::types::{ structs::*, events::* };
 
 pub fn start_anti_rug(
     bot_config: BotConfig,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
     sell_oracle: Arc<Mutex<SellOracle>>,
+    nonce_oracle: Arc<Mutex<NonceOracle>>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
@@ -45,7 +35,6 @@ pub fn start_anti_rug(
                     continue;
                 }
             };
-
 
             // start the anti rug oracle by subscribing to pending txs
             while let Ok(event) = new_mempool_receiver.recv().await {
@@ -68,7 +57,6 @@ pub fn start_anti_rug(
                     .iter()
                     .map(|x| x.pool)
                     .collect::<Vec<Pool>>();
-
 
                 // exclude our address
                 if pending_tx.from == get_my_address() || pending_tx.from == get_admin_address() {
@@ -105,7 +93,6 @@ pub fn start_anti_rug(
                 );
 
                 let empty_fork_db = empty_fork_factory.new_sandbox_fork();
-                
 
                 // ** first see if the pending_tx touches one of the pools in the oracle
                 // ** We want to check if the DeV is trying to rug by removing liquidity
@@ -127,12 +114,12 @@ pub fn start_anti_rug(
 
                 if touched_pools.len() > 0 {
                     // ** Run simulations to detect any unusual behavior
-                    
 
                     for pool in touched_pools {
                         let snipe_txs = snipe_txs.clone();
                         let anti_rug_oracle_clone = anti_rug_oracle.clone();
                         let sell_oracle = sell_oracle.clone();
+                        let nonce_oracle = nonce_oracle.clone();
                         let client = client.clone();
                         let next_block = next_block.clone();
                         let pending_tx = pending_tx.clone();
@@ -146,11 +133,7 @@ pub fn start_anti_rug(
 
                             // initialize cache db by inserting pool storage
                             let cache_db = match
-                                insert_pool_storage(
-                                    client.clone(),
-                                    pool,
-                                    latest_block_number
-                                ).await
+                                insert_pool_storage(client.clone(), pool, latest_block_number).await
                             {
                                 Ok(cache_db) => cache_db,
                                 Err(e) => {
@@ -185,12 +168,14 @@ pub fn start_anti_rug(
                             };
 
                             // ** get the amount_out in weth after the pending tx
-                            
+
                             let amount_out_after = match
                                 simulate_sell_after(
                                     &pending_tx,
                                     pool,
                                     next_block.clone(),
+                                    SWAP_EVENT.clone(),
+                                    TRANSFER_EVENT.clone(),
                                     empty_fork_db
                                 )
                             {
@@ -220,7 +205,6 @@ pub fn start_anti_rug(
                                     "Amount out After: ETH {:?}",
                                     convert_wei_to_ether(amount_out_after)
                                 );
-                                log::info!("Amount out After Raw: {:?}", amount_out_after);
 
                                 // ** generate tx_data
                                 let tx_data = match
@@ -249,12 +233,12 @@ pub fn start_anti_rug(
                                 };
 
                                 // if the tx is legacy should return 0
-                                let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
-
+                                let pending_tx_priority_fee =
+                                    pending_tx.max_priority_fee_per_gas.unwrap_or_default();
 
                                 // ** calculate miner tip based on the pending tx priority fee
                                 // ** here we could set a more aggressive miner tip
-                                let miner_tip = calculate_miner_tip(pending_tx_priority_fee);
+                                let mut miner_tip = calculate_miner_tip(pending_tx_priority_fee);
 
                                 // ** max fee per gas must always be higher than miner tip
                                 let max_fee_per_gas = next_block.base_fee + miner_tip;
@@ -276,18 +260,30 @@ pub fn start_anti_rug(
                                     "Pending tx priority fee: {:?}",
                                     pending_tx_priority_fee
                                 );
+
+                                // get the nonce
+                                let mut nonce_guard = nonce_oracle.lock().await;
+                                let nonce = nonce_guard.get_nonce();
+                                nonce_guard.update_nonce(nonce + 1);
+                                drop(nonce_guard);
+
+                                // ** make sure the miner tip is not less than the sell priority fee
+                                // in case we have conficting txs atleast we can replace it
+                                if miner_tip < *MINER_TIP_TO_SELL {
+                                    miner_tip = (*MINER_TIP_TO_SELL * 12) / 10; // +20%
+                                }
+
                                 log::info!("Our Miner Tip: {:?}", convert_wei_to_gwei(miner_tip));
 
-                                // ** Send the Tx
-                                // Because we want immedietly sell the token in the next block
-                                // We are sending the tx without Mev builders, hoping that they will respect the priority fee
-                                // The reason behind this even if we tip them a good amount of ether they can still reject the bundle
+                            // ** Send Tx directly to builders
                                 let is_bundle_included = match
-                                    send_normal_tx(
+                                    send_tx(
                                         client.clone(),
                                         tx_data,
+                                        next_block,
                                         miner_tip,
-                                        max_fee_per_gas
+                                        max_fee_per_gas,
+                                        nonce
                                     ).await
                                 {
                                     Ok(is_included) => is_included,
@@ -308,12 +304,11 @@ pub fn start_anti_rug(
                                         .unwrap();
 
                                     // ** remove the tx from the anti-rug and sell oracle
-                                    let mut oracle_guard = anti_rug_oracle_clone.lock().await;
-                                    oracle_guard.remove_tx_data(snipe_tx.clone());
-                                    drop(oracle_guard);
-                                    let mut sell_oracle_guard = sell_oracle.lock().await;
-                                    sell_oracle_guard.remove_tx_data(snipe_tx.clone());
-                                    drop(sell_oracle_guard);
+                                    remove_tx_from_oracles(
+                                        sell_oracle.clone(),
+                                        anti_rug_oracle_clone.clone(),
+                                        snipe_tx.clone()
+                                    ).await;
                                     log::info!("SnipeTx removed from the oracles");
                                 } else {
                                     log::warn!("Bundle not included, we are getting rugged! GG");
@@ -329,12 +324,12 @@ pub fn start_anti_rug(
     }); // end of main tokio::spawn
 }
 
-
 // Checks for transactions that touches the token contract address
 pub fn anti_honeypot(
     bot_config: BotConfig,
     anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
     sell_oracle: Arc<Mutex<SellOracle>>,
+    nonce_oracle: Arc<Mutex<NonceOracle>>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
@@ -359,15 +354,19 @@ pub fn anti_honeypot(
                     oracle.tx_data.clone()
                 };
 
+                // ** no snipe tx in oracle, skip
+                if snipe_txs.is_empty() {
+                    continue;
+                }
+
                 // ** get the pools from the SnipeTx
                 let vec_pools = snipe_txs
                     .iter()
                     .map(|x| x.pool)
                     .collect::<Vec<Pool>>();
 
-                // ** no pools yet in the oracle, skip
                 if vec_pools.is_empty() {
-                    continue;
+                    log::warn!("Anti-Honeypot: Could not get pools from SnipeTx");
                 }
 
                 // excluded our address
@@ -384,6 +383,7 @@ pub fn anti_honeypot(
                 let client = client.clone();
                 let anti_rug_oracle = anti_rug_oracle.clone();
                 let sell_oracle = sell_oracle.clone();
+                let nonce_oracle = nonce_oracle.clone();
                 let block_oracle = bot_config.block_oracle.clone();
 
                 tokio::spawn(async move {
@@ -456,11 +456,14 @@ pub fn anti_honeypot(
 
                         // ** get the amount_out in weth after the pending tx
                         // ** Here we use an empty db cause we do the sell after the pending tx
+
                         let amount_out_after = match
                             simulate_sell_after(
                                 &pending_tx,
                                 *touched_pool,
                                 next_block.clone(),
+                                SWAP_EVENT.clone(),
+                                TRANSFER_EVENT.clone(),
                                 empty_fork_factory.new_sandbox_fork()
                             )
                         {
@@ -486,16 +489,11 @@ pub fn anti_honeypot(
                                 "Amount out After: ETH {:?}",
                                 convert_wei_to_ether(amount_out_after)
                             );
-                            log::info!("Amount out After Raw: {:?}", amount_out_after);
 
                             // ** generate tx_data
                             // ** We use the populated backend
                             let tx_data = match
-                                generate_sell_tx_data(
-                                    *touched_pool,
-                                    next_block.clone(),
-                                    fork_db
-                                )
+                                generate_sell_tx_data(*touched_pool, next_block.clone(), fork_db)
                             {
                                 Ok(tx) => tx,
                                 Err(e) => {
@@ -516,14 +514,11 @@ pub fn anti_honeypot(
                             };
 
                             // if the tx is legacy should return 0
-                            let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
-
+                            let pending_tx_priority_fee =
+                                pending_tx.max_priority_fee_per_gas.unwrap_or_default();
 
                             // ** calculate miner tip
-                            let miner_tip = calculate_miner_tip(pending_tx_priority_fee);
-
-                            // ** max fee per gas must always be higher than miner tip
-                            let max_fee_per_gas = next_block.base_fee + miner_tip;
+                            let mut miner_tip = calculate_miner_tip(pending_tx_priority_fee);
 
                             // ** First check if its worth it to frontrun the tx
                             // ** calculate the total gas cost
@@ -537,19 +532,37 @@ pub fn anti_honeypot(
                                 return;
                             }
                             log::info!("Escaping HoneyPot!🚀");
-                            log::info!("Pending tx priority fee: {:?}", convert_wei_to_gwei(pending_tx_priority_fee));
+                            log::info!(
+                                "Pending tx priority fee: {:?}",
+                                convert_wei_to_gwei(pending_tx_priority_fee)
+                            );
+
+                            // ** make sure the miner tip is not less than the sell priority fee
+                            // in case we have conficting txs atleast we can replace it
+                            if miner_tip < *MINER_TIP_TO_SELL {
+                                miner_tip = (*MINER_TIP_TO_SELL * 12) / 10; // +20%
+                            }
+
                             log::info!("Our Miner Tip: {:?}", convert_wei_to_gwei(miner_tip));
 
-                            // ** Send the Tx to Flashbots
-                            // Because we want immedietly sell the token in the next block
-                            // We are sending the tx without Mev builders, hoping that they will respect the priority fee
+                            // get the nonce and update it
+                            let mut nonce_guard = nonce_oracle.lock().await;
+                            let nonce = nonce_guard.get_nonce();
+                            nonce_guard.update_nonce(nonce + 1);
+                            drop(nonce_guard);
 
+                            // ** max fee per gas must always be higher than miner tip
+                            let max_fee_per_gas = next_block.base_fee + miner_tip;
+
+                            // ** Send Tx directly to builders
                             let is_bundle_included = match
-                                send_normal_tx(
+                                send_tx(
                                     client.clone(),
                                     tx_data,
+                                    next_block,
                                     miner_tip,
-                                    max_fee_per_gas
+                                    max_fee_per_gas,
+                                    nonce
                                 ).await
                             {
                                 Ok(is_included) => is_included,
@@ -570,10 +583,11 @@ pub fn anti_honeypot(
                                     .unwrap();
 
                                 // ** remove the tx from the oracles
-                                let mut oracle = anti_rug_oracle.lock().await;
-                                oracle.remove_tx_data(snipe_tx.clone());
-                                let mut sell_oracle = sell_oracle.lock().await;
-                                sell_oracle.remove_tx_data(snipe_tx.clone());
+                                remove_tx_from_oracles(
+                                    sell_oracle.clone(),
+                                    anti_rug_oracle.clone(),
+                                    snipe_tx.clone()
+                                ).await;
                                 log::info!("SnipeTx removed from the oracles");
                             } else {
                                 log::warn!("Bundle not included, we are getting rugged! GG");
