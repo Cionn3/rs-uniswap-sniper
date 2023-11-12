@@ -10,10 +10,9 @@ use log::LevelFilter;
 use fern::colors::{Color, ColoredLevelConfig};
 use colored::Colorize;
 use utils::helpers::create_local_client;
+use crate::bot::bot_start::start;
 
 
-
-use bot::bot_config::BotConfig;
 
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
@@ -30,9 +29,8 @@ async fn main() -> anyhow::Result<()> {
 
     let client = create_local_client().await?;
 
-    let mut bot_config = BotConfig::new(client.clone()).await?;
-
-    bot_config.start().await;
+    // start the bot
+    start(client).await;
 
 
     Ok(())

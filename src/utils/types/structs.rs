@@ -1,4 +1,7 @@
 use ethers::prelude::*;
+use tokio::sync::{ Mutex, RwLock };
+use std::sync::Arc;
+use crate::oracles::{ block_oracle::BlockOracle, BlockInfo };
 
 use ethers::types::transaction::eip2930::AccessList;
 
@@ -34,6 +37,135 @@ impl TxData {
             frontrun_or_backrun,
         }
     }
+}
+
+// Holds all oracles for the bot
+#[derive(Debug, Clone)]
+pub struct Bot {
+    pub block_oracle: Arc<RwLock<BlockOracle>>,
+    pub nonce_oracle: Arc<Mutex<NonceOracle>>,
+    pub sell_oracle: Arc<Mutex<SellOracle>>,
+    pub anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
+}
+
+impl Bot {
+    // creates a new instance of bot holding the oracles
+    pub fn new(
+        block_oracle: Arc<RwLock<BlockOracle>>,
+        nonce_oracle: Arc<Mutex<NonceOracle>>,
+        sell_oracle: Arc<Mutex<SellOracle>>,
+        anti_rug_oracle: Arc<Mutex<AntiRugOracle>>
+    ) -> Self {
+        Bot {
+            block_oracle,
+            nonce_oracle,
+            sell_oracle,
+            anti_rug_oracle,
+        }
+    }
+    // returns latest and next block info
+    pub async fn get_block_info(&self) -> (BlockInfo, BlockInfo) {
+        let block_oracle = self.block_oracle.read().await;
+        let latest_block = block_oracle.latest_block.clone();
+        let next_block = block_oracle.next_block.clone();
+        drop(block_oracle);
+
+        (latest_block, next_block)
+    }
+
+    // returns the nonce and updates it
+    pub async fn get_nonce(&mut self) -> U256 {
+        let mut nonce_oracle = self.nonce_oracle.lock().await;
+        let nonce = nonce_oracle.get_nonce();
+        nonce_oracle.update_nonce(nonce + 1);
+        drop(nonce_oracle);
+
+        nonce
+    }
+
+    // get tx len of sell oracle
+    pub async fn get_sell_oracle_tx_len(&self) -> usize {
+        let sell_oracle = self.sell_oracle.lock().await;
+        let tx_len = sell_oracle.get_tx_len();
+        drop(sell_oracle);
+
+        tx_len
+    }
+
+    // get tx len of anti-rug oracle
+    pub async fn get_anti_rug_oracle_tx_len(&self) -> usize {
+        let anti_rug_oracle = self.anti_rug_oracle.lock().await;
+        let tx_len = anti_rug_oracle.get_tx_len();
+        drop(anti_rug_oracle);
+
+        tx_len
+    }
+
+    // get all snipe tx data from sell oracle
+    pub async fn get_sell_oracle_tx_data(&self) -> Vec<SnipeTx> {
+        let sell_oracle = self.sell_oracle.lock().await;
+        let tx_data = sell_oracle.tx_data.clone();
+        drop(sell_oracle);
+
+        tx_data
+    }
+
+    // adds a new tx to the sell oracle
+    pub async fn add_tx_data(&mut self, tx_data: SnipeTx) {
+        let mut sell_oracle = self.sell_oracle.lock().await;
+        sell_oracle.add_tx_data(tx_data);
+        drop(sell_oracle);
+    }
+
+    // adds a new tx to the anti-rug oracle
+    pub async fn add_anti_rug_tx_data(&mut self, tx_data: SnipeTx) {
+        let mut anti_rug_oracle = self.anti_rug_oracle.lock().await;
+        anti_rug_oracle.add_tx_data(tx_data);
+        drop(anti_rug_oracle);
+    }
+
+    // removes a tx from the sell oracle
+    pub async fn remove_tx_data(&mut self, tx_data: SnipeTx) {
+        let mut sell_oracle = self.sell_oracle.lock().await;
+        sell_oracle.remove_tx_data(tx_data);
+        drop(sell_oracle);
+    }
+
+    // removes a tx from the anti-rug oracle
+    pub async fn remove_anti_rug_tx_data(&mut self, tx_data: SnipeTx) {
+        let mut anti_rug_oracle = self.anti_rug_oracle.lock().await;
+        anti_rug_oracle.remove_tx_data(tx_data);
+        drop(anti_rug_oracle);
+    }
+
+    // updated target amount to sell for a specific tx
+    pub async fn update_target_amount(&mut self, snipe_tx: SnipeTx, target_amount: U256) {
+        let mut sell_oracle = self.sell_oracle.lock().await;
+        sell_oracle.update_target_amount(snipe_tx, target_amount);
+        drop(sell_oracle);
+    }
+
+    // sets if a tx is pending or not
+    pub async fn set_tx_is_pending(&mut self, snipe_tx: SnipeTx, tx_is_pending: bool) {
+        let mut sell_oracle = self.sell_oracle.lock().await;
+        sell_oracle.set_tx_is_pending(snipe_tx, tx_is_pending);
+        drop(sell_oracle);
+    }
+
+    // updates attempts to sell counter
+    pub async fn update_attempts_to_sell(&mut self, snipe_tx: SnipeTx) {
+        let mut sell_oracle = self.sell_oracle.lock().await;
+        sell_oracle.update_attempts_to_sell(snipe_tx);
+        drop(sell_oracle);
+    }
+
+    // updates whether we have got the initial out as profit
+    pub async fn update_got_initial_out(&mut self, snipe_tx: SnipeTx, got_initial_out: bool) {
+        let mut sell_oracle = self.sell_oracle.lock().await;
+        sell_oracle.update_got_initial_out(snipe_tx, got_initial_out);
+        drop(sell_oracle);
+    }
+
 }
 
 // Holds the data for our snipe transaction

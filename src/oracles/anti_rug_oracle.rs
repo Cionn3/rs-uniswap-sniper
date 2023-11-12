@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use revm::db::{ CacheDB, EmptyDB };
 use crate::utils::helpers::*;
+use super::*;
 use crate::bot::send_tx::send_tx;
 use crate::utils::simulate::simulate::{
     simulate_sell,
@@ -14,14 +15,10 @@ use crate::utils::simulate::simulate::{
 };
 use crate::utils::simulate::insert_pool_storage;
 use crate::forked_db::fork_factory::ForkFactory;
-use crate::bot::bot_config::BotConfig;
-use crate::utils::types::{ structs::*, events::* };
+use crate::utils::types::events::*;
 
 pub fn start_anti_rug(
-    bot_config: BotConfig,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    nonce_oracle: Arc<Mutex<NonceOracle>>,
+    bot: Arc<Mutex<Bot>>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
@@ -42,10 +39,9 @@ pub fn start_anti_rug(
                     MemPoolEvent::NewTx { tx } => tx,
                 };
                 // ** Get the snipe tx data from the oracle
-                let snipe_txs = {
-                    let oracle = sell_oracle.lock().await;
-                    oracle.tx_data.clone()
-                };
+                let bot_guard = bot.lock().await;
+                let snipe_txs = bot_guard.get_sell_oracle_tx_data().await;
+                drop(bot_guard);
 
                 // ** no snipe tx in oracle, skip
                 if snipe_txs.is_empty() {
@@ -62,18 +58,12 @@ pub fn start_anti_rug(
                 if pending_tx.from == get_my_address() || pending_tx.from == get_admin_address() {
                     continue;
                 }
-                let block_oracle = bot_config.block_oracle.clone();
+                // get the block info from the oracle
+                let bot_guard = bot.lock().await;
+                let (latest_block, next_block) = bot_guard.get_block_info().await;
+                drop(bot_guard);
 
-                let next_block = {
-                    let block_oracle = block_oracle.read().await;
-                    block_oracle.next_block.clone()
-                };
 
-                // get the latest block from oracle
-                let latest_block = {
-                    let block_oracle = block_oracle.read().await;
-                    block_oracle.latest_block.clone()
-                };
                 let latest_block_number = Some(
                     BlockId::Number(BlockNumber::Number(latest_block.number))
                 );
@@ -117,14 +107,12 @@ pub fn start_anti_rug(
 
                     for pool in touched_pools {
                         let snipe_txs = snipe_txs.clone();
-                        let anti_rug_oracle_clone = anti_rug_oracle.clone();
-                        let sell_oracle = sell_oracle.clone();
-                        let nonce_oracle = nonce_oracle.clone();
+                        let bot = bot.clone();
                         let client = client.clone();
                         let next_block = next_block.clone();
                         let pending_tx = pending_tx.clone();
                         let empty_fork_db = empty_fork_db.clone();
-                        let latest_block_number = latest_block_number;
+                        
 
                         tokio::spawn(async move {
                             // ** First simulate a sell tx before the pending tx
@@ -262,10 +250,9 @@ pub fn start_anti_rug(
                                 );
 
                                 // get the nonce
-                                let mut nonce_guard = nonce_oracle.lock().await;
-                                let nonce = nonce_guard.get_nonce();
-                                nonce_guard.update_nonce(nonce + 1);
-                                drop(nonce_guard);
+                                let mut bot_guard = bot.lock().await;
+                                let nonce = bot_guard.get_nonce().await;
+                                drop(bot_guard);
 
                                 // ** make sure the miner tip is not less than the sell priority fee
                                 // in case we have conficting txs atleast we can replace it
@@ -305,8 +292,7 @@ pub fn start_anti_rug(
 
                                     // ** remove the tx from the anti-rug and sell oracle
                                     remove_tx_from_oracles(
-                                        sell_oracle.clone(),
-                                        anti_rug_oracle_clone.clone(),
+                                        bot,
                                         snipe_tx.clone()
                                     ).await;
                                     log::info!("SnipeTx removed from the oracles");
@@ -326,10 +312,7 @@ pub fn start_anti_rug(
 
 // Checks for transactions that touches the token contract address
 pub fn anti_honeypot(
-    bot_config: BotConfig,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    nonce_oracle: Arc<Mutex<NonceOracle>>,
+    bot: Arc<Mutex<Bot>>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
@@ -349,10 +332,9 @@ pub fn anti_honeypot(
                     MemPoolEvent::NewTx { tx } => tx,
                 };
                 // ** Get the snipe tx data from the oracle
-                let snipe_txs = {
-                    let oracle = sell_oracle.lock().await;
-                    oracle.tx_data.clone()
-                };
+                let bot_guard = bot.lock().await;
+                let snipe_txs = bot_guard.get_sell_oracle_tx_data().await;
+                drop(bot_guard);
 
                 // ** no snipe tx in oracle, skip
                 if snipe_txs.is_empty() {
@@ -381,10 +363,7 @@ pub fn anti_honeypot(
 
                 // ** Clone vars
                 let client = client.clone();
-                let anti_rug_oracle = anti_rug_oracle.clone();
-                let sell_oracle = sell_oracle.clone();
-                let nonce_oracle = nonce_oracle.clone();
-                let block_oracle = bot_config.block_oracle.clone();
+                let bot = bot.clone();
 
                 tokio::spawn(async move {
                     // ** if pending_tx.to matches one of the token addresses in vec_pools
@@ -395,16 +374,11 @@ pub fn anti_honeypot(
                             .find(|x| pending_tx.to == Some(x.token_1))
                             .unwrap();
 
-                        // get the next block
-                        let next_block = {
-                            let block_oracle = block_oracle.read().await;
-                            block_oracle.next_block.clone()
-                        };
-                        // get the latest block from oracle
-                        let latest_block = {
-                            let block_oracle = block_oracle.read().await;
-                            block_oracle.latest_block.clone()
-                        };
+                        // get the blockinfo
+                        let bot_guard = bot.lock().await;
+                        let (latest_block, next_block) = bot_guard.get_block_info().await;
+                        drop(bot_guard);
+
                         let latest_block_number = Some(
                             BlockId::Number(BlockNumber::Number(latest_block.number))
                         );
@@ -546,10 +520,9 @@ pub fn anti_honeypot(
                             log::info!("Our Miner Tip: {:?}", convert_wei_to_gwei(miner_tip));
 
                             // get the nonce and update it
-                            let mut nonce_guard = nonce_oracle.lock().await;
-                            let nonce = nonce_guard.get_nonce();
-                            nonce_guard.update_nonce(nonce + 1);
-                            drop(nonce_guard);
+                            let mut bot_guard = bot.lock().await;
+                            let nonce = bot_guard.get_nonce().await;
+                            drop(bot_guard);
 
                             // ** max fee per gas must always be higher than miner tip
                             let max_fee_per_gas = next_block.base_fee + miner_tip;
@@ -584,8 +557,7 @@ pub fn anti_honeypot(
 
                                 // ** remove the tx from the oracles
                                 remove_tx_from_oracles(
-                                    sell_oracle.clone(),
-                                    anti_rug_oracle.clone(),
+                                    bot,
                                     snipe_tx.clone()
                                 ).await;
                                 log::info!("SnipeTx removed from the oracles");

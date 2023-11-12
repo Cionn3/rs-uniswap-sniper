@@ -10,39 +10,52 @@ use crate::forked_db::fork_factory::ForkFactory;
 use crate::utils::simulate::insert_pool_storage;
 use crate::utils::simulate::simulate::{ tax_check, generate_buy_tx_data, transfer_check };
 use crate::utils::helpers::*;
+use crate::oracles::{ add_tx_to_oracles, remove_tx_from_oracles };
 use super::send_tx::send_tx;
 use crate::utils::types::{ structs::*, events::* };
 use revm::db::{ CacheDB, EmptyDB };
 
-use super::bot_config::BotConfig;
+
 
 pub fn start_sniper(
-    bot_config: BotConfig,
     mut new_pair_receiver: broadcast::Receiver<NewPairEvent>,
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    retry_oracle: Arc<Mutex<RetryOracle>>,
-    nonce_oracle: Arc<Mutex<NonceOracle>>
+    bot: Arc<Mutex<Bot>>,
+    retry_oracle: Arc<Mutex<RetryOracle>>
 ) {
     tokio::spawn(async move {
-        while let Ok(event) = new_pair_receiver.recv().await {
-            match event {
-                NewPairEvent::NewPairWithTx { pool, tx } => {
-                    // process the tx
-                    match
-                        process_tx(
-                            bot_config.clone(),
-                            pool,
-                            tx,
-                            sell_oracle.clone(),
-                            anti_rug_oracle.clone(),
-                            retry_oracle.clone(),
-                            nonce_oracle.clone()
-                        ).await
-                    {
-                        Ok(_) => log::info!("Tx Sent Successfully"),
-                        Err(e) =>
-                            log::error!("Sniper Failed: for token {:?} Err {:?}", pool.token_1, e),
+        loop {
+            let client = match create_local_client().await {
+                Ok(client) => client,
+                Err(e) => {
+                    log::error!("Failed to create local client: {}", e);
+                    // we reconnect by restarting the loop
+                    continue;
+                }
+            };
+
+            // start the oracle by subscribing to new pairs
+
+            while let Ok(event) = new_pair_receiver.recv().await {
+                match event {
+                    NewPairEvent::NewPairWithTx { pool, tx } => {
+                        // process the tx
+                        match
+                            process_tx(
+                                bot.clone(),
+                                retry_oracle.clone(),
+                                client.clone(),
+                                pool,
+                                tx
+                            ).await
+                        {
+                            Ok(_) => log::info!("Tx Sent Successfully"),
+                            Err(e) =>
+                                log::error!(
+                                    "Sniper Failed: for token {:?} Err {:?}",
+                                    pool.token_1,
+                                    e
+                                ),
+                        }
                     }
                 }
             }
@@ -51,27 +64,18 @@ pub fn start_sniper(
 }
 
 async fn process_tx(
-    bot_config: BotConfig,
-    pool: Pool,
-    pending_tx: Transaction,
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
+    bot: Arc<Mutex<Bot>>,
     retry_oracle: Arc<Mutex<RetryOracle>>,
-    nonce_oracle: Arc<Mutex<NonceOracle>>
+    client: Arc<Provider<Ws>>,
+    pool: Pool,
+    pending_tx: Transaction
 ) -> Result<(), anyhow::Error> {
-    let client = bot_config.client.clone();
-    let block_oracle = bot_config.block_oracle.clone();
-    let amount_in = bot_config.initial_amount_in_weth;
+    // get block info from oracle
+    let bot_guard = bot.lock().await;
+    let (latest_block, next_block) = bot_guard.get_block_info().await;
+    drop(bot_guard);
 
-    // get the next block
-    let next_block = {
-        let block_oracle = block_oracle.read().await;
-        block_oracle.next_block.clone()
-    };
-
-    // get the latest blockId
-    let latest_block = client.get_block_number().await.unwrap();
-    let latest_block = Some(BlockId::Number(BlockNumber::Number(latest_block)));
+    let latest_block = Some(BlockId::Number(BlockNumber::Number(latest_block.number)));
 
     // initialize an empty cache db
     let cache_db = CacheDB::new(EmptyDB::default());
@@ -79,12 +83,11 @@ async fn process_tx(
     // setup fork factory backend
     let fork_factory = ForkFactory::new_sandbox_factory(client.clone(), cache_db, latest_block);
 
-
     // simulate the tx
     let is_swap_success = match
         tax_check(
             &pool,
-            amount_in.clone(),
+            *INITIAL_AMOUNT_IN_WETH,
             &next_block,
             Some(pending_tx.clone()),
             TRANSFER_EVENT.clone(),
@@ -103,9 +106,9 @@ async fn process_tx(
         // generate snipe_tx data
         let snipe_tx = SnipeTx {
             pool: pool,
-            amount_in: amount_in,
+            amount_in: *INITIAL_AMOUNT_IN_WETH,
             expected_amount_of_tokens: U256::zero(),
-            target_amount_weth: bot_config.target_amount_to_sell,
+            target_amount_weth: *TARGET_AMOUNT_TO_SELL,
             tx_call_data: Bytes::new(),
             access_list: AccessList::default(),
             gas_used: 0u64,
@@ -120,6 +123,7 @@ async fn process_tx(
             reason: 1u8, // 1 means swap failed
             got_initial_out: false,
         };
+
         // push it to retry oracle
         let mut retry_oracle = retry_oracle.lock().await;
         retry_oracle.add_tx_data(snipe_tx.clone());
@@ -130,7 +134,7 @@ async fn process_tx(
     let _transfer_result = match
         transfer_check(
             &pool,
-            amount_in,
+            *INITIAL_AMOUNT_IN_WETH,
             &next_block,
             Some(pending_tx.clone()),
             fork_factory.new_sandbox_fork()
@@ -150,7 +154,7 @@ async fn process_tx(
     let snipe_tx = match
         generate_buy_tx_data(
             &pool,
-            amount_in,
+            *INITIAL_AMOUNT_IN_WETH,
             &next_block,
             Some(pending_tx.clone()),
             *MINER_TIP_TO_SNIPE,
@@ -198,13 +202,12 @@ async fn process_tx(
     // We dont want to get rugged while we wait
 
     // add the snipe_tx to oracles
-    add_tx_to_oracles(sell_oracle.clone(), anti_rug_oracle.clone(), snipe_tx.clone()).await;
+    add_tx_to_oracles(bot.clone(), snipe_tx.clone()).await;
 
     // get the nonce and update it
-    let mut nonce_guard = nonce_oracle.lock().await;
-    let nonce = nonce_guard.get_nonce();
-    nonce_guard.update_nonce(nonce + 1);
-    drop(nonce_guard);
+    let mut bot_guard = bot.lock().await;
+    let nonce = bot_guard.get_nonce().await;
+    drop(bot_guard);
 
     log::info!("Token {:?} Sent To Oracles! 🚀", pool.token_1);
 
@@ -230,11 +233,8 @@ async fn process_tx(
     // if the bundle is not included
     if is_bundle_included == false {
         // remove the snipe_tx from the oracles
-        remove_tx_from_oracles(
-            sell_oracle.clone(),
-            anti_rug_oracle.clone(),
-            snipe_tx.clone()
-        ).await;
+        remove_tx_from_oracles(bot.clone(), snipe_tx.clone()).await;
+
         log::info!("Token {:?} Removed From Oracles! 🚀", pool.token_1);
 
         // if our tx is not included its better to remove it and move on
@@ -247,11 +247,8 @@ async fn process_tx(
 }
 
 pub fn snipe_retry(
-    bot_config: BotConfig,
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
+    bot: Arc<Mutex<Bot>>,
     retry_oracle: Arc<Mutex<RetryOracle>>,
-    nonce_oracle: Arc<Mutex<NonceOracle>>,
     mut new_block_receive: broadcast::Receiver<NewBlockEvent>
 ) {
     tokio::spawn(async move {
@@ -285,13 +282,10 @@ pub fn snipe_retry(
 
                 let client = client.clone();
 
-                let block_oracle = bot_config.block_oracle.clone();
-
-                // get the next block
-                let next_block = {
-                    let block_oracle = block_oracle.read().await;
-                    block_oracle.next_block.clone()
-                };
+                // get the next_block
+                let bot_guard = bot.lock().await;
+                let (_, next_block) = bot_guard.get_block_info().await;
+                drop(bot_guard);
 
                 let latest_block_number = Some(
                     BlockId::Number(BlockNumber::Number(latest_block.number))
@@ -308,14 +302,15 @@ pub fn snipe_retry(
                         let mut retry_oracle = retry_oracle.lock().await;
                         retry_oracle.remove_tx_data(tx.clone());
                         drop(retry_oracle);
-                        log::warn!("Retries >={:?}, Removed tx from retry oracle", *MAX_SNIPE_RETRIES);
+                        log::warn!(
+                            "Retries >={:?}, Removed tx from retry oracle",
+                            *MAX_SNIPE_RETRIES
+                        );
                         continue;
                     }
 
-                    let sell_oracle = sell_oracle.clone();
-                    let anti_rug_oracle = anti_rug_oracle.clone();
+                    let bot = bot.clone();
                     let retry_oracle = retry_oracle.clone();
-                    let nonce_oracle = nonce_oracle.clone();
 
                     let client = client.clone();
 
@@ -457,11 +452,7 @@ pub fn snipe_retry(
                         }
 
                         // add the snipe_tx to oracles
-                        add_tx_to_oracles(
-                            sell_oracle.clone(),
-                            anti_rug_oracle.clone(),
-                            snipe_tx.clone()
-                        ).await;
+                        add_tx_to_oracles(bot.clone(), snipe_tx.clone()).await;
 
                         // set tx to retry pennding true
                         let mut retry_oracle_guard = retry_oracle.lock().await;
@@ -469,10 +460,9 @@ pub fn snipe_retry(
                         drop(retry_oracle_guard);
 
                         // get the nonce and update it
-                        let mut nonce_guard = nonce_oracle.lock().await;
-                        let nonce = nonce_guard.get_nonce();
-                        nonce_guard.update_nonce(nonce + 1);
-                        drop(nonce_guard);
+                        let mut bot_guard = bot.lock().await;
+                        let nonce = bot_guard.get_nonce().await;
+                        drop(bot_guard);
 
                         log::info!("Retry Oracle: Sent Tx To Oracles! 🚀");
 
@@ -518,11 +508,8 @@ pub fn snipe_retry(
                             drop(retry_oracle_guard);
 
                             // remove the tx from oracles so we dont get bombarded with logs
-                            remove_tx_from_oracles(
-                                sell_oracle.clone(),
-                                anti_rug_oracle.clone(),
-                                tx.clone()
-                            ).await;
+                            remove_tx_from_oracles(bot.clone(), tx.clone()).await;
+
                             log::warn!("Bundle Not Included");
                             return;
                         }

@@ -1,12 +1,8 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use std::str::FromStr;
 use ethers::{ prelude::*, types::transaction::eip2718::TypedTransaction };
 use ethers::types::transaction::eip2930::{ AccessList, AccessListItem };
-use crate::forked_db::fork_db::ForkDB;
-use crate::utils::simulate::get_token_balance;
-use crate::oracles::block_oracle::BlockInfo;
-use crate::utils::types::structs::{ SellOracle, AntiRugOracle, SnipeTx };
+
 
 use revm::primitives::{ U256 as rU256, B160 as rAddress };
 use bigdecimal::BigDecimal;
@@ -179,41 +175,6 @@ pub fn load_abi_from_file(file_path: &str) -> Result<String, Box<dyn std::error:
     Ok(content)
 }
 
-// helper function for sell oracle
-// checks the position we got
-// and adjust target sell price accordingly
-pub async fn check_position(
-    initial_amount_in: U256,
-    next_block: &BlockInfo,
-    token: Address,
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    snipe_tx: SnipeTx,
-    fork_db: ForkDB
-) -> Result<(), anyhow::Error> {
-    // get the token balance
-    let token_balance = get_token_balance(
-        token,
-        get_snipe_contract_address(),
-        &next_block,
-        fork_db
-    )?;
-
-    // if the token_balance is less than 40% of expected amount
-    // we assume that we got a bad position
-    if token_balance < (snipe_tx.expected_amount_of_tokens * 6) / 10 {
-        // set the target_amount_weth to 3x
-       let target_amount_weth = (initial_amount_in * 30) / 10;
-        // update the target_amount_weth in the oracle
-        let mut oracle_guard = sell_oracle.lock().await;
-        oracle_guard.update_target_amount(snipe_tx.clone(), target_amount_weth);
-        drop(oracle_guard);
-        log::warn!("Got a bad position, changed target amount to 3x");
-        Ok(())
-    } else {
-        log::info!("Position is good");
-        Ok(())
-    }
-}
 
 /// Sign eip1559 transactions
 pub async fn sign_eip1559(
@@ -357,30 +318,4 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
     let mut output = [0u8; 32];
     output.copy_from_slice(&result);
     output
-}
-
-pub async fn remove_tx_from_oracles(
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    snipe_tx: SnipeTx
-) {
-    let mut sell_oracle_guard = sell_oracle.lock().await;
-    sell_oracle_guard.remove_tx_data(snipe_tx.clone());
-    drop(sell_oracle_guard);
-    let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
-    anti_rug_oracle_guard.remove_tx_data(snipe_tx.clone());
-    drop(anti_rug_oracle_guard);
-}
-
-pub async fn add_tx_to_oracles(
-    sell_oracle: Arc<Mutex<SellOracle>>,
-    anti_rug_oracle: Arc<Mutex<AntiRugOracle>>,
-    snipe_tx: SnipeTx
-) {
-    let mut sell_oracle_guard = sell_oracle.lock().await;
-    sell_oracle_guard.add_tx_data(snipe_tx.clone());
-    drop(sell_oracle_guard);
-    let mut anti_rug_oracle_guard = anti_rug_oracle.lock().await;
-    anti_rug_oracle_guard.add_tx_data(snipe_tx.clone());
-    drop(anti_rug_oracle_guard);
 }

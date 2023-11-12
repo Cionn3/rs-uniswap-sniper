@@ -1,6 +1,7 @@
 use tokio::sync::broadcast::Sender;
 use ethers::prelude::*;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use crate::utils::helpers::{
     create_local_client,
@@ -11,7 +12,7 @@ use crate::utils::helpers::{
 };
 use crate::utils::types::events::MemPoolEvent;
 use crate::utils::simulate::simulate::get_pair;
-use crate::bot::bot_config::BotConfig;
+use crate::oracles::block_oracle::BlockOracle;
 use crate::forked_db::fork_factory::ForkFactory;
 use crate::utils::types::{ structs::Pool, events::NewPairEvent };
 use revm::db::{ CacheDB, EmptyDB };
@@ -21,7 +22,7 @@ const PAIR_CREATED_ABI: &str =
 
 // Monitor pending txs for new pairs created
 pub fn start_pair_oracle(
-    bot_config: BotConfig,
+    block_oracle: Arc<RwLock<BlockOracle>>,
     new_pair_sender: Sender<NewPairEvent>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
@@ -55,7 +56,7 @@ pub fn start_pair_oracle(
             let mint_event_abi = contract.event("Mint").expect("Failed to extract Mint event");
 
             // ** get the next block from oracle
-            let block_oracle = bot_config.block_oracle.clone();
+            let block_oracle = block_oracle.clone();
 
             // using semaphore to limit the number of concurrent requests
             // in case we receive a lot of new txs (reorgs)
