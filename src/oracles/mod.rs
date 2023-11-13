@@ -220,8 +220,8 @@ pub async fn take_profit(
         next_block.clone(),
         snipe_tx.pool,
         amount_in,
-        SWAP_EVENT.clone(),
-        TRANSFER_EVENT.clone(),
+        get_swap_event(),
+        get_transfer_event(),
         fork_factory.new_sandbox_fork()
     )?;
 

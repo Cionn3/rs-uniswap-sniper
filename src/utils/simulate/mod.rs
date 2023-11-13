@@ -17,7 +17,7 @@ use revm::primitives::{ ExecutionResult, Output, TransactTo, AccountInfo, Log };
 use revm::db::{ CacheDB, EmptyDB };
 use crate::utils::{ helpers::*, types::structs::Pool };
 use std::sync::Arc;
-use revm::primitives::{ Address as rAddress, Bytecode, U256 as rU256 };
+use revm::primitives::{ Address as rAddress, Bytecode, U256 as rU256, B256 };
 use anyhow::anyhow;
 
 // Setup evm blockstate
@@ -490,7 +490,7 @@ pub async fn get_acc_info(
     let balance = client.get_balance(address, fork_block).await?;
     let code = client.get_code(address, fork_block).await?;
 
-    let acc_info = AccountInfo::new(balance.into(), nonce.as_u64(), Bytecode::new_raw(code.0));
+    let acc_info = AccountInfo::new(balance.into(), nonce.as_u64(), B256::default(), Bytecode::new_raw(code.0));
 
     Ok(acc_info)
 }

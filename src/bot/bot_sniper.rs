@@ -90,8 +90,8 @@ async fn process_tx(
             *INITIAL_AMOUNT_IN_WETH,
             &next_block,
             Some(pending_tx.clone()),
-            TRANSFER_EVENT.clone(),
-            SWAP_EVENT.clone(),
+            get_transfer_event(),
+            get_swap_event(),
             fork_factory.new_sandbox_fork()
         )
     {
@@ -158,8 +158,8 @@ async fn process_tx(
             &next_block,
             Some(pending_tx.clone()),
             *MINER_TIP_TO_SNIPE,
-            SWAP_EVENT.clone(),
-            TRANSFER_EVENT.clone(),
+            get_swap_event(),
+            get_transfer_event(),
             fork_factory.new_sandbox_fork()
         )
     {
@@ -346,8 +346,8 @@ pub fn snipe_retry(
                                 *INITIAL_AMOUNT_IN_WETH,
                                 &next_block,
                                 None,
-                                TRANSFER_EVENT.clone(),
-                                SWAP_EVENT.clone(),
+                                get_transfer_event(),
+                                get_swap_event(),
                                 fork_factory.new_sandbox_fork()
                             )
                         {
@@ -401,8 +401,8 @@ pub fn snipe_retry(
                                 &next_block,
                                 None,
                                 *MINER_TIP_TO_SNIPE_RETRY,
-                                SWAP_EVENT.clone(),
-                                TRANSFER_EVENT.clone(),
+                                get_swap_event(),
+                                get_transfer_event(),
                                 fork_factory.new_sandbox_fork()
                             )
                         {

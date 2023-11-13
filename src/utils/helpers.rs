@@ -14,6 +14,10 @@ use lazy_static::lazy_static;
 const TRANSFER_EVENT_ABI: &str =
     "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"value\",\"type\":\"uint256\"}],\"name\":\"Transfer\",\"type\":\"event\"}]";
 
+// swap event abi
+const SWAP_EVENT_ABI: &str = 
+    "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"amount0In\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"amount1In\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"amount0Out\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"amount1Out\",\"type\":\"uint256\"},{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"}],\"name\":\"Swap\",\"type\":\"event\"}]";
+
 lazy_static! {
     pub static ref WETH: Address = get_weth_address();
 
@@ -69,25 +73,6 @@ lazy_static! {
     // default is 4 eth
     pub static ref MAX_WETH_RESERVE: U256 = U256::from(4000000000000000000u128);
 
-
-    // ** other constants
-
-    pub static ref TRANSFER_EVENT: ethabi::Event = {
-        let load_transfer_event = ethabi::Contract::load(TRANSFER_EVENT_ABI.as_bytes()).unwrap();
-        let transfer_event = load_transfer_event.event("Transfer").unwrap();
-        transfer_event.clone()
-    };
-
-    pub static ref SWAP_EVENT: ethabi::Event = {
-        let v2_pair_abi = load_abi_from_file("../../src/utils/abi/IUniswapV2Pair.abi").expect(
-            "Failed to load ABI"
-        );
-        let v2_pair_contract = ethabi::Contract
-            ::load(v2_pair_abi.as_bytes())
-            .expect("Failed to load contract");
-        let swap_event = v2_pair_contract.event("Swap").expect("Failed to extract Swap event");
-        swap_event.clone()
-    };
 }
 
 // address to call contract from (SWAP_USER)
@@ -173,6 +158,18 @@ pub fn convert_wei_to_gwei(wei: U256) -> BigDecimal {
 pub fn load_abi_from_file(file_path: &str) -> Result<String, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(file_path)?;
     Ok(content)
+}
+
+pub fn get_swap_event() -> ethabi::Event {
+    let load_swap_event = ethabi::Contract::load(SWAP_EVENT_ABI.as_bytes()).unwrap();
+    let swap_event = load_swap_event.event("Swap").unwrap();
+    swap_event.clone()
+}
+
+pub fn get_transfer_event() -> ethabi::Event {
+    let load_transfer_event = ethabi::Contract::load(TRANSFER_EVENT_ABI.as_bytes()).unwrap();
+    let transfer_event = load_transfer_event.event("Transfer").unwrap();
+    transfer_event.clone()
 }
 
 

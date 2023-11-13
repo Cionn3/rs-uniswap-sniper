@@ -162,8 +162,8 @@ pub fn start_anti_rug(
                                     &pending_tx,
                                     pool,
                                     next_block.clone(),
-                                    SWAP_EVENT.clone(),
-                                    TRANSFER_EVENT.clone(),
+                                    get_swap_event(),
+                                    get_transfer_event(),
                                     empty_fork_db
                                 )
                             {
@@ -436,8 +436,8 @@ pub fn anti_honeypot(
                                 &pending_tx,
                                 *touched_pool,
                                 next_block.clone(),
-                                SWAP_EVENT.clone(),
-                                TRANSFER_EVENT.clone(),
+                                get_swap_event(),
+                                get_transfer_event(),
                                 empty_fork_factory.new_sandbox_fork()
                             )
                         {
