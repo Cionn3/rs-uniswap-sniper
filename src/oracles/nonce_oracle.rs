@@ -2,8 +2,11 @@ use ethers::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::utils::helpers::{ create_local_client, get_nonce, get_my_address };
-use crate::utils::types::structs::NonceOracle;
+use crate::utils::types::structs::oracles::NonceOracle;
 use crate::utils::types::events::NewBlockEvent;
+
+
+
 
 pub fn start_nonce_oracle(
     oracle: Arc<Mutex<NonceOracle>>,
@@ -22,11 +25,8 @@ pub fn start_nonce_oracle(
             };
 
             // start the nonce oracle by subscribing to new blocks
-            while let Ok(event) = new_block_receive.recv().await {
+            while let Ok(_event) = new_block_receive.recv().await {
 
-                let _latest_block = match event {
-                    NewBlockEvent::NewBlock { latest_block } => latest_block,
-                };
 
                 // get the nonce
                 let nonce: Option<U256> = match get_nonce(client.clone(), get_my_address()).await {

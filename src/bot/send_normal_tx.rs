@@ -1,18 +1,22 @@
 use std::sync::Arc;
 use ethers::prelude::*;
-use crate::utils::helpers::sign_eip1559;
-use crate::utils::types::structs::TxData;
-use crate::utils::helpers::{ get_my_address, get_my_wallet };
+use ethers::types::transaction::eip2718::TypedTransaction;
+use crate::oracles::block_oracle::BlockInfo;
+
+use crate::utils::types::structs::tx_data::TxData;
+use crate::utils::helpers::{ get_my_address, get_my_wallet, get_snipe_contract_address, sign_eip1559 };
+
+
+
 
 pub async fn send_normal_tx(
     client: Arc<Provider<Ws>>,
     tx_data: TxData,
+    next_block: BlockInfo,
     miner_tip: U256,
-    max_fee_per_gas: U256,
     nonce: U256,
 ) -> Result<bool, anyhow::Error> {
     let my_wallet = get_my_wallet();
-    let my_address = get_my_address();
 
 
 
@@ -20,12 +24,12 @@ pub async fn send_normal_tx(
     let gas_limit = U256::from(500000u128);
 
     let tx_request = Eip1559TransactionRequest {
-        to: Some(NameOrAddress::Address(tx_data.sniper_contract_address)),
-        from: Some(my_address),
+        to: Some(NameOrAddress::Address(get_snipe_contract_address())),
+        from: Some(get_my_address()),
         data: Some(tx_data.tx_call_data.clone()),
         chain_id: Some(U64::from(1)),
         max_priority_fee_per_gas: Some(miner_tip),
-        max_fee_per_gas: Some(max_fee_per_gas),
+        max_fee_per_gas: Some(next_block.base_fee + miner_tip),
         gas: Some(gas_limit),
         nonce: Some(nonce),
         value: Some(U256::zero()),
@@ -45,7 +49,7 @@ pub async fn send_normal_tx(
     let tx_hash = tx_hash.clone();
 
     // a small delay to not spam the node
-    let delay = tokio::time::Duration::from_millis(1);
+    let delay = tokio::time::Duration::from_millis(10);
     let mut tx_receipt = None;
 
     // Wait until we get the receipt

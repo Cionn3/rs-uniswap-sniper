@@ -1,4 +1,4 @@
-use super::structs::*;
+use super::structs::pool::Pool;
 use crate::oracles::block_oracle::BlockInfo;
 use ethers::types::Transaction;
 

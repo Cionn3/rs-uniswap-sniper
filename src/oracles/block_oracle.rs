@@ -30,7 +30,6 @@ impl BlockInfo {
         let number = prev_block.number.unwrap_or_default() + 1;
         let timestamp = prev_block.timestamp + 12;
         let base_fee = calculate_next_block_base_fee(prev_block);
-
         Self {
             number,
             timestamp,

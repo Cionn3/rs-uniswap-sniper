@@ -1,6 +1,7 @@
 use futures::channel::mpsc::{SendError, TrySendError};
 use std::sync::{mpsc::RecvError, Arc};
 
+#[allow(dead_code)]
 // Errors that can happen when working with [`revm::Database`]
 #[derive(Debug, thiserror::Error)]
 pub enum DatabaseError {
@@ -36,6 +37,7 @@ impl<T> From<TrySendError<T>> for DatabaseError {
     }
 }
 
+#[allow(dead_code)]
 impl DatabaseError {
     // Create a new error with a message
     pub fn msg(msg: impl Into<String>) -> Self {

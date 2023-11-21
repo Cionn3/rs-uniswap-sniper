@@ -49,6 +49,7 @@ impl ForkFactory {
         )
     }
 
+    #[allow(dead_code)]
     // Used locally in `insert_account_storage` to fetch accoutn info if account does not exist
     fn do_get_basic(&self, address: rAddress) -> DatabaseResult<Option<AccountInfo>> {
         tokio::task::block_in_place(|| {
@@ -89,6 +90,7 @@ impl ForkFactory {
         ForkDB::new(self.backend.clone(), self.initial_db.clone())
     }
 
+    #[allow(dead_code)]
     // Insert storage into local db
     pub fn insert_account_storage(
         &mut self,
@@ -115,6 +117,7 @@ impl ForkFactory {
         Ok(())
     }
 
+    #[allow(dead_code)]
     // Insert account basic info into local db
     pub fn insert_account_info(&mut self, address: rAddress, info: AccountInfo) {
         self.initial_db.insert_account_info(address, info);

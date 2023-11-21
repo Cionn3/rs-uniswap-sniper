@@ -1,6 +1,8 @@
 // parts of code taken from reth:
 // https://github.com/paradigmxyz/reth/blob/6d138daa1159ea92dc28a4e31d6be6a2f07ba565/crates/revm/revm-inspectors/src/access_list.rs
 use hashbrown::{HashMap, HashSet};
+use ethers::types::transaction::eip2930::{AccessList, AccessListItem};
+use ethers::types::{H256, U256, BigEndianHash};
 use revm::{
     interpreter::{opcode, InstructionResult, Interpreter},
     precompile::Precompiles,
@@ -122,4 +124,34 @@ where
 
         InstructionResult::Continue
     }
+}
+
+
+// Converts access list from revm to ethers type
+//
+// Arguments:
+// * `access_list`: access list in revm format
+//
+// Returns:
+// `AccessList` in ethers format
+pub fn convert_access_list(access_list: Vec<(rAddress, Vec<rU256>)>) -> AccessList {
+    let mut converted_access_list = Vec::new();
+    for access in access_list {
+        let address = access.0;
+        let keys = access.1;
+        let access_item = AccessListItem {
+            address: address.0.into(),
+            storage_keys: keys
+                .iter()
+                .map(|k| {
+                    let slot_u256: U256 = k.clone().into();
+                    let slot_h256: H256 = H256::from_uint(&slot_u256);
+                    slot_h256
+                })
+                .collect::<Vec<H256>>(),
+        };
+        converted_access_list.push(access_item);
+    }
+
+    AccessList(converted_access_list)
 }

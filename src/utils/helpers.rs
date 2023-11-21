@@ -1,103 +1,50 @@
 use std::sync::Arc;
 use std::str::FromStr;
-use ethers::{ prelude::*, types::transaction::eip2718::TypedTransaction };
-use ethers::types::transaction::eip2930::{ AccessList, AccessListItem };
-
-
-use revm::primitives::{ U256 as rU256, B160 as rAddress };
+use ethers::prelude::*;
+use ethers::types::transaction::eip2718::TypedTransaction;
 use bigdecimal::BigDecimal;
+use crate::utils::abi::UniswapV2Pair;
+use anyhow::anyhow;
 use std::fs;
 use sha3::{ Digest, Keccak256 };
-use lazy_static::lazy_static;
 
 // transfer event abi
 const TRANSFER_EVENT_ABI: &str =
     "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"from\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"value\",\"type\":\"uint256\"}],\"name\":\"Transfer\",\"type\":\"event\"}]";
 
 // swap event abi
-const SWAP_EVENT_ABI: &str = 
+const SWAP_EVENT_ABI: &str =
     "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"sender\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"amount0In\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"amount1In\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"amount0Out\",\"type\":\"uint256\"},{\"indexed\":false,\"name\":\"amount1Out\",\"type\":\"uint256\"},{\"indexed\":true,\"name\":\"to\",\"type\":\"address\"}],\"name\":\"Swap\",\"type\":\"event\"}]";
 
-lazy_static! {
-    pub static ref WETH: Address = get_weth_address();
-
-    // ** BOT SETTINGS **
-
-    // change these settings as you like
-
-    // ** BUY SLIPPAGE SETTINGS **
-    // chnage numerator to adjust slippage
-    // 7 is for 30% slippage
-    // for example if you want 20% slippage change it to 8 and so on
-    pub static ref BUY_NUMERATOR: u128 = 7;
-    pub static ref BUY_DENOMINATOR: u128 = 10;
 
 
-    // Amount In to snipe
-    // 0.025 eth
-    pub static ref INITIAL_AMOUNT_IN_WETH: U256 = U256::from(25000000000000000u128);
 
-    // target amount to sell in eth
-    // 0.6 eth = 24x
-    pub static ref TARGET_AMOUNT_TO_SELL: U256 = U256::from(600000000000000000u128);
-
-    // how many xs the token must do in order to get
-    // the initial amount back
-    // default is 5 which the price must pump 5x
-    // if you dont want to take your initial out just put a very high number here
-    pub static ref INITIAL_PROFIT_TAKE: U256 = U256::from(5u128);
-
-    // miner tip to snipe
-    // default is 100 gwei
-    pub static ref MINER_TIP_TO_SNIPE: U256 = U256::from(100000000000u128);
-
-    // miner tip when we retry
-    // 50 gwei
-    pub static ref MINER_TIP_TO_SNIPE_RETRY: U256 = U256::from(50000000000u128);
-    
-    // miner tip to use when selling
-    // 10 gwei
-    pub static ref MINER_TIP_TO_SELL: U256 = U256::from(10000000000u128);
-
-    // how many times we try to sell before we remove the token from the sell oracle
-    pub static ref MAX_SELL_ATTEMPTS: u8 = 20;
-
-    // how many times we retry to buy a token before we remove it from the retry oracle
-    pub static ref MAX_SNIPE_RETRIES: u8 = 3;
-
-    // minimum weth reserve for a new pair
-    // default is 1 eth
-    pub static ref MIN_WETH_RESERVE: U256 = U256::from(1000000000000000000u128);
-
-    // maximum weth reserve for a new pair
-    // default is 4 eth
-    pub static ref MAX_WETH_RESERVE: U256 = U256::from(4000000000000000000u128);
-
+// the address which you sign the transactions and call the contract
+pub fn get_my_address() -> Address {
+    Address::from_str("0xYOUR_ADDRESS").unwrap()
 }
 
-// address to call contract from (SWAP_USER)
-pub fn get_my_address() -> Address {
-    Address::from_str("0xyouraddress").unwrap()
+// the address of the snipe contract
+pub fn get_snipe_contract_address() -> Address {
+    Address::from_str("0xCONTRACT_ADDRESS").unwrap()
 }
 
 // address to withdraw funds to
 pub fn get_admin_address() -> Address {
-    Address::from_str("0xyouraddress").unwrap()
-}
-
-// your contract address goes here
-pub fn get_snipe_contract_address() -> Address {
-    Address::from_str("0xyourcontracttaddress").unwrap()
+    Address::from_str("0xYOUR_ADDRESS").unwrap()
 }
 
 pub fn get_weth_address() -> Address {
-    Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap()
+    Address::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap()
 }
+
 
 // wallet used to sign the trasnactions and call the contract
 // fill in your private key here
 pub fn get_my_wallet() -> LocalWallet {
-    let private_key: String = "0xprivatekey".parse().expect("private key wrong format?");
+    let private_key: String = "0xYOUR_PRIVATE_KEY"
+        .parse()
+        .expect("private key wrong format?");
     private_key.parse::<LocalWallet>().expect("Failed to parse private key")
 }
 
@@ -113,13 +60,16 @@ pub fn get_flashbot_searcher() -> LocalWallet {
 
 // flashbot identity , could also be a random private key
 pub fn get_flashbots_auth_key() -> String {
-    "0xprivatekey".to_string()
+    "0xYOUR_PRIVATE_KEY".to_string()
 }
 
 // flashbot searcher signer, must be the same private key as the wallet used to sign the tx
 pub fn get_flashbots_searcher_key() -> String {
-    "0xprivatekey".to_string()
+    "0xYOUR_PRIVATE_KEY".to_string()
 }
+
+
+
 
 
 
@@ -134,6 +84,8 @@ pub async fn get_local_client() -> Result<Provider<Ws>, anyhow::Error> {
     let provider = Provider::<Ws>::connect(url).await?;
     Ok(provider)
 }
+
+
 
 pub async fn get_nonce(
     client: Arc<Provider<Ws>>,
@@ -190,79 +142,33 @@ pub async fn sign_eip1559(
     Ok(tx_typed.rlp_signed(&signed_frontrun_tx_sig))
 }
 
-// Converts access list from revm to ethers type
-//
-// Arguments:
-// * `access_list`: access list in revm format
-//
-// Returns:
-// `AccessList` in ethers format
-pub fn convert_access_list(access_list: Vec<(rAddress, Vec<rU256>)>) -> AccessList {
-    let mut converted_access_list = Vec::new();
-    for access in access_list {
-        let address = access.0;
-        let keys = access.1;
-        let access_item = AccessListItem {
-            address: address.0.into(),
-            storage_keys: keys
-                .iter()
-                .map(|k| {
-                    let slot_u256: U256 = k.clone().into();
-                    let slot_h256: H256 = H256::from_uint(&slot_u256);
-                    slot_h256
-                })
-                .collect::<Vec<H256>>(),
-        };
-        converted_access_list.push(access_item);
-    }
+// get the reserves from a V2 pool
+pub async fn get_reserves(
+    target_pool: Address,
+    client: Arc<Provider<Ws>>
+) -> Result<U256, anyhow::Error> {
+    let pair = UniswapV2Pair::new(target_pool, client.clone());
 
-    AccessList(converted_access_list)
+    let token_a = pair.token_0().call().await?;
+
+    let (reserve_a, reserve_b, _) = match pair.get_reserves().call().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(anyhow!("Error getting reserves {:?}", e));
+        }
+    };
+
+    // match the tokens with the corrospinding reserves
+    let reserve_base = if token_a == get_weth_address() {
+        reserve_a
+    } else {
+        reserve_b
+    };
+
+    Ok(reserve_base.into())
 }
 
-pub fn calculate_miner_tip(pending_tx_priority_fee: U256) -> U256 {
-    let point_one_gwei = U256::from(100000000u128); // 0.1 gwei
-    let point_five_gwei = U256::from(500000000u128); // 0.5 gwei
-    let one_gwei = U256::from(1000000000u128); // 1 gwei
-    let two_gwei = U256::from(2000000000u128); // 2 gwei
-    let three_gwei = U256::from(3000000000u128); // 3
-    let ten_gwei = U256::from(10000000000u128); // 10 gwei
 
-    let miner_tip;
-
-    // match pending_tx_priorite_fee to the different lvls we set
-    match pending_tx_priority_fee {
-        // if pending fee is 0
-        fee if fee == (0).into() => {
-            miner_tip = ten_gwei; // 10 gwei
-        }
-        // if pending fee is between  0 ish and 0.1 gwei
-        fee if fee < point_one_gwei => {
-            miner_tip = fee * 200; // maximum 20 gwei
-        }
-        // if pending fee is between 0.1 and 0.5 gwei
-        fee if fee >= point_one_gwei && fee < point_five_gwei => {
-            miner_tip = fee * 50; // maximum 25 gwei
-        }
-        // if fee is between 0.5 and 1 gwei
-        fee if fee >= point_five_gwei && fee < one_gwei => {
-            miner_tip = fee * 20; // maximum 20 gwei
-        }
-        // if pending fee is between 1 and 2 gwei
-        fee if fee >= one_gwei && fee < two_gwei => {
-            miner_tip = fee * 10; // maximum 20 gwei
-        }
-        // if fee is between 2 and 3 gwei
-        fee if fee >= two_gwei && fee < three_gwei => {
-            miner_tip = fee * 10; // maximum 30 gwei
-        }
-        // for anything else
-        _ => {
-            miner_tip = (pending_tx_priority_fee * 15) / 10; // +50%
-        }
-    }
-
-    miner_tip
-}
 
 pub fn encode_swap(
     input_token: Address,
@@ -292,6 +198,7 @@ pub fn encode_swap(
     payload
 }
 
+#[allow(dead_code)]
 pub fn create_withdraw_data(input_token: Address, amount_in: U256) -> Vec<u8> {
     // The method's signature hash (first 4 bytes of the keccak256 hash of the signature).
     let method_id = &keccak256(b"withdraw(address,uint256)")[0..4];

@@ -14,12 +14,13 @@ use crate::bot::bot_start::start;
 
 
 
+
 #[cfg(not(target_env = "msvc"))]
 use tikv_jemallocator::Jemalloc;
 
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     panic::set_hook(Box::new(|panic_info| {
         log::error!("Bot panicked: {:?}", panic_info);
     }));
@@ -29,13 +30,12 @@ async fn main() -> anyhow::Result<()> {
 
     let client = create_local_client().await?;
 
-    // start the bot
-    start(client).await;
-
+        // start the bot
+        start(client).await;
 
     Ok(())
-
 }
+
 
 fn setup_logging() -> Result<(), fern::InitError> {
     // Configure colors for different log levels
@@ -66,8 +66,6 @@ let console = Dispatch::new()
         metadata.level() == log::Level::Info || metadata.level() == log::Level::Warn
     })
     .chain(std::io::stdout());
-
-
 
 
 
@@ -106,4 +104,3 @@ let console = Dispatch::new()
 
     Ok(())
 }
-
