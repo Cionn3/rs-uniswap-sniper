@@ -1,5 +1,5 @@
 use tokio::sync::broadcast::Sender;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use ethers::prelude::*;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -14,7 +14,7 @@ const PAIR_CREATED_ABI: &str =
 
 // Monitor pending txs for new pairs created
 pub fn start_pair_oracle(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     new_pair_sender: Sender<NewPairEvent>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
@@ -57,7 +57,7 @@ pub fn start_pair_oracle(
                 }
 
                 // get the block info
-                let bot_guard = bot.lock().await;
+                let bot_guard = bot.read().await;
                 let (_, next_block) = bot_guard.get_block_info().await;
                 let fork_db = bot_guard.get_fork_db().await;
                 drop(bot_guard);

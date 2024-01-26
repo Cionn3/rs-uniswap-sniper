@@ -1,6 +1,6 @@
 use ethers::prelude::*;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 
 use crate::utils::helpers::*;
@@ -18,7 +18,7 @@ use crate::utils::evm::simulate::sim::simulate_sell;
 
 // ** Running swap simulations on every block to keep track of the selling price
 pub fn start_sell_oracle(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     mut new_block_receiver: broadcast::Receiver<NewBlockEvent>
 ) {
     tokio::spawn(async move {
@@ -46,12 +46,12 @@ pub fn start_sell_oracle(
 } // end of start_sell_oracle
 
 async fn process(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     client: Arc<Provider<Ws>>,
     latest_block: BlockInfo
 ) -> Result<(), anyhow::Error> {
     // ** Get the snipe tx data from the oracle
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let snipe_txs = bot_guard.get_sell_oracle_tx_data().await;
     let (_, next_block) = bot_guard.get_block_info().await;
     let fork_db = bot_guard.get_fork_db().await;
@@ -93,7 +93,7 @@ async fn process(
                 log::info!("Got Taxed 90% + for {:?}", tx.pool.token_1);
                 log::info!("GG!");
                 // update the retry counter
-                let mut bot_guard = bot.lock().await;
+                let mut bot_guard = bot.write().await;
                 bot_guard.update_attempts_to_sell(tx.clone()).await;
                 drop(bot_guard);
             }

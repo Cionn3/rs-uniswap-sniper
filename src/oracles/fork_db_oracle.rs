@@ -5,12 +5,12 @@ use crate::utils::helpers::create_local_client;
 use crate::forked_db::fork_factory::ForkFactory;
 use crate::utils::types::{structs::oracles::ForkOracle, events::NewBlockEvent};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 
 
 pub fn start_forkdb_oracle(
-    oracle: Arc<Mutex<ForkOracle>>,
+    oracle: Arc<RwLock<ForkOracle>>,
     mut new_block_receive: broadcast::Receiver<NewBlockEvent>
 ) {
     tokio::spawn(async move {
@@ -46,7 +46,7 @@ pub fn start_forkdb_oracle(
                 let fork_db = fork_factory.new_sandbox_fork();
                 
                 // update fork_db
-                let mut oracle_guard = oracle.lock().await;
+                let mut oracle_guard = oracle.write().await;
                 oracle_guard.update_fork_db(fork_db);
                 drop(oracle_guard);
             } // end of while loop

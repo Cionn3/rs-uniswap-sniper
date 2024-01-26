@@ -16,7 +16,7 @@ use revm::db::{ CacheDB, EmptyDB };
 use super::bot_sniper::{ snipe_retry, start_sniper };
 use crate::utils::types::{ structs::{ oracles::*, bot::Bot }, events::* };
 use std::sync::Arc;
-use tokio::sync::{ RwLock, Mutex, broadcast };
+use tokio::sync::{ RwLock, broadcast };
 use tokio::{ signal, task };
 
 pub async fn start(client: Arc<Provider<Ws>>) {
@@ -36,16 +36,16 @@ pub async fn start(client: Arc<Provider<Ws>>) {
     );
     let fork_db = fork_factory.new_sandbox_fork();
 
-    // Use Arc<Mutex<>> to share Oracles across tasks.
-    let sell_oracle = Arc::new(Mutex::new(SellOracle::new()));
-    let retry_oracle = Arc::new(Mutex::new(RetryOracle::new()));
-    let anti_rug_oracle = Arc::new(Mutex::new(AntiRugOracle::new()));
-    let nonce_oracle = Arc::new(Mutex::new(NonceOracle::new()));
-    let fork_db_oracle = Arc::new(Mutex::new(ForkOracle::new(fork_db)));
+    // Use Arc<RwLock<>> to share Oracles across tasks.
+    let sell_oracle = Arc::new(RwLock::new(SellOracle::new()));
+    let retry_oracle = Arc::new(RwLock::new(RetryOracle::new()));
+    let anti_rug_oracle = Arc::new(RwLock::new(AntiRugOracle::new()));
+    let nonce_oracle = Arc::new(RwLock::new(NonceOracle::new()));
+    let fork_db_oracle = Arc::new(RwLock::new(ForkOracle::new(fork_db)));
 
     // hold all oracles inside bot struct
     let bot = Arc::new(
-        Mutex::new(
+        RwLock::new(
             Bot::new(
                 block_oracle.clone(),
                 nonce_oracle.clone(),

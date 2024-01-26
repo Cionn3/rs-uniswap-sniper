@@ -1,7 +1,7 @@
 use tokio::sync::broadcast;
 
 use ethers::prelude::*;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use std::sync::Arc;
 
 use crate::{
@@ -21,7 +21,7 @@ use crate::bot::send_tx::send_tx;
 
 
 pub fn start_anti_rug(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
@@ -51,12 +51,12 @@ pub fn start_anti_rug(
 }
 
 async fn process_anti_rug(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     client: &Arc<Provider<Ws>>,
     pending_tx: Transaction
 ) -> Result<(), anyhow::Error> {
     // ** Get the snipe tx data from the oracle
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let snipe_txs = bot_guard.get_sell_oracle_tx_data().await;
     drop(bot_guard);
 
@@ -72,7 +72,7 @@ async fn process_anti_rug(
         .collect::<Vec<Pool>>();
 
     // ** get the block info from the oracle
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let (_, next_block) = bot_guard.get_block_info().await;
     let fork_db = bot_guard.get_fork_db().await;
     drop(bot_guard);
@@ -174,7 +174,7 @@ async fn process_anti_rug(
                     log::info!("Our Miner Tip: {:?}", convert_wei_to_gwei(miner_tip));
 
                     // get the nonce
-                    let mut bot_guard = bot.lock().await;
+                    let mut bot_guard = bot.write().await;
                     let nonce = bot_guard.get_nonce().await;
                     drop(bot_guard);
 
@@ -209,7 +209,7 @@ async fn process_anti_rug(
 }
 
 pub fn start_anti_honeypot(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     mut new_mempool_receiver: broadcast::Receiver<MemPoolEvent>
 ) {
     tokio::spawn(async move {
@@ -239,12 +239,12 @@ pub fn start_anti_honeypot(
 }
 
 async fn process_anti_honeypot(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     client: &Arc<Provider<Ws>>,
     pending_tx: Transaction
 ) -> Result<(), anyhow::Error> {
     // ** Get the snipe tx data from the oracle
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let snipe_txs = bot_guard.get_sell_oracle_tx_data().await;
     drop(bot_guard);
 
@@ -276,7 +276,7 @@ async fn process_anti_honeypot(
                 .unwrap();
 
             // get the blockinfo
-            let bot_guard = bot.lock().await;
+            let bot_guard = bot.read().await;
             let (_, next_block) = bot_guard.get_block_info().await;
             let fork_db = bot_guard.get_fork_db().await;
             drop(bot_guard);
@@ -342,7 +342,7 @@ async fn process_anti_honeypot(
                 log::info!("Our Miner Tip: {:?}", convert_wei_to_gwei(miner_tip));
 
                 // get the nonce
-                let mut bot_guard = bot.lock().await;
+                let mut bot_guard = bot.write().await;
                 let nonce = bot_guard.get_nonce().await;
                 drop(bot_guard);
 

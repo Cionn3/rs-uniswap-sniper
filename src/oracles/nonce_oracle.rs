@@ -1,6 +1,6 @@
 use ethers::prelude::*;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use crate::utils::helpers::{ create_local_client, get_nonce, get_my_address };
 use crate::utils::types::structs::oracles::NonceOracle;
 use crate::utils::types::events::NewBlockEvent;
@@ -9,7 +9,7 @@ use crate::utils::types::events::NewBlockEvent;
 
 
 pub fn start_nonce_oracle(
-    oracle: Arc<Mutex<NonceOracle>>,
+    oracle: Arc<RwLock<NonceOracle>>,
     mut new_block_receive: tokio::sync::broadcast::Receiver<NewBlockEvent>
 ) {
     let oracle = oracle.clone();
@@ -40,7 +40,7 @@ pub fn start_nonce_oracle(
 
                 // update the nonce
                 {
-                    let mut oracle_guard = oracle.lock().await;
+                    let mut oracle_guard = oracle.write().await;
                     oracle_guard.update_nonce(nonce.unwrap_or_default());
                 }
 

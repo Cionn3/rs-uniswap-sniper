@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use ethers::types::U256;
 use crate::utils::types::structs::{bot::Bot, snipe_tx::SnipeTx};
 
@@ -20,20 +20,20 @@ pub mod send_tx;
 
 
 pub async fn remove_tx_from_oracles(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     snipe_tx: SnipeTx
 ) {
-    let mut bot_guard = bot.lock().await;
+    let mut bot_guard = bot.write().await;
     bot_guard.remove_tx_data(snipe_tx.clone()).await;
     bot_guard.remove_anti_rug_tx_data(snipe_tx.clone()).await;
     drop(bot_guard);
 }
 
 pub async fn add_tx_to_oracles(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     snipe_tx: SnipeTx
 ) {
-    let mut bot_guard = bot.lock().await;
+    let mut bot_guard = bot.write().await;
     bot_guard.add_tx_data(snipe_tx.clone()).await;
     bot_guard.add_anti_rug_tx_data(snipe_tx.clone()).await;
     drop(bot_guard);

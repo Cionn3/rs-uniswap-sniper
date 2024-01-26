@@ -1,7 +1,7 @@
 use tokio::sync::broadcast;
 use ethers::prelude::*;
 
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use std::sync::Arc;
 
 use crate::utils::constants::*;
@@ -16,7 +16,7 @@ use super::send_tx::send_tx;
 
 pub fn start_sniper(
     mut new_pair_receiver: broadcast::Receiver<NewPairEvent>,
-    bot: Arc<Mutex<Bot>>
+    bot: Arc<RwLock<Bot>>
 ) {
     tokio::spawn(async move {
         loop {
@@ -46,14 +46,14 @@ pub fn start_sniper(
 }
 
 async fn process_tx(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     client: Arc<Provider<Ws>>,
     pool: Pool,
     pending_tx: Transaction
 ) -> Result<(), anyhow::Error> {
     // get block info from oracle
 
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let (_, next_block) = bot_guard.get_block_info().await;
     let fork_db = bot_guard.get_fork_db().await;
     drop(bot_guard);
@@ -79,7 +79,7 @@ async fn process_tx(
     // if swap fails push it to retry oracle
     if !is_swap_success {
         let snipe_tx = SnipeTx::default(pool, *TARGET_AMOUNT_TO_SELL, next_block.number);
-        let mut bot_guard = bot.lock().await;
+        let mut bot_guard = bot.write().await;
         bot_guard.add_tx_to_retry_oracle(snipe_tx).await;
         drop(bot_guard);
         return Err(anyhow::anyhow!("Swap failed, sent to retry oracle"));
@@ -103,7 +103,7 @@ async fn process_tx(
     add_tx_to_oracles(bot.clone(), snipe_tx.clone()).await;
 
     // get the nonce and update it
-    let mut bot_guard = bot.lock().await;
+    let mut bot_guard = bot.write().await;
     let nonce = bot_guard.get_nonce().await;
     drop(bot_guard);
 
@@ -122,7 +122,7 @@ async fn process_tx(
         remove_tx_from_oracles(bot.clone(), snipe_tx.clone()).await;
 
         // push to retry oracle
-        let mut bot_guard = bot.lock().await;
+        let mut bot_guard = bot.write().await;
         bot_guard.add_tx_to_retry_oracle(snipe_tx).await;
         drop(bot_guard);
     }
@@ -131,7 +131,7 @@ async fn process_tx(
 }
 
 pub fn snipe_retry(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     mut new_block_receive: broadcast::Receiver<NewBlockEvent>
 ) {
     tokio::spawn(async move {
@@ -161,11 +161,11 @@ pub fn snipe_retry(
 }
 
 async fn process_retry_tx(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     client: Arc<Provider<Ws>>,
 ) -> Result<(), anyhow::Error> {
     // get block info  and tx data
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let (_, next_block) = bot_guard.get_block_info().await;
     let snipe_txs = bot_guard.get_retry_oracle_tx_data().await;
     let fork_db = bot_guard.get_fork_db().await;
@@ -189,7 +189,7 @@ async fn process_retry_tx(
 
         // if we reached the retry limit remove tx from oracles
         if tx.snipe_retries >= *MAX_SNIPE_RETRIES {
-            let mut bot_guard = bot.lock().await;
+            let mut bot_guard = bot.write().await;
             bot_guard.remove_tx_from_retry_oracle(tx.clone()).await;
             drop(bot_guard);
             continue;
@@ -207,7 +207,7 @@ async fn process_retry_tx(
         // if current weth reserve has increased by at least 20% skip
         if current_reserve > tx.pool.weth_liquidity * 120 / 100 {
             // remove tx from retry oracle
-            let mut bot = bot.lock().await;
+            let mut bot = bot.write().await;
             bot.remove_tx_from_retry_oracle(tx.clone()).await;
             drop(bot);
             log::warn!("Token already sniped, removed from retry oracle");
@@ -226,7 +226,7 @@ async fn process_retry_tx(
 
             // if amount in is zero skip
             if amount_in == U256::zero() {
-                let mut bot_guard = bot.lock().await;
+                let mut bot_guard = bot.write().await;
                 bot_guard.update_retry_counter(tx.clone()).await;
                 drop(bot_guard);
                 return;
@@ -243,7 +243,7 @@ async fn process_retry_tx(
 
             // if swap fails update counter
             if !is_swap_success {
-                let mut bot_guard = bot.lock().await;
+                let mut bot_guard = bot.write().await;
                 bot_guard.update_retry_counter(tx.clone()).await;
                 drop(bot_guard);
                 return;
@@ -265,7 +265,7 @@ async fn process_retry_tx(
             add_tx_to_oracles(bot.clone(), snipe_tx.clone()).await;
 
             // set tx to pending and get the nonce
-            let mut bot_guard = bot.lock().await;
+            let mut bot_guard = bot.write().await;
             bot_guard.update_retry_pending(tx.clone(), true).await;
             let nonce = bot_guard.get_nonce().await;
             drop(bot_guard);
@@ -281,12 +281,12 @@ async fn process_retry_tx(
 
             if is_bundle_included {
                 // remove it from retry
-                let mut bot_guard = bot.lock().await;
+                let mut bot_guard = bot.write().await;
                 bot_guard.remove_tx_from_retry_oracle(tx.clone()).await;
                 drop(bot_guard);
             } else {
                 // update the counter and pending status
-                let mut bot_guard = bot.lock().await;
+                let mut bot_guard = bot.write().await;
                 bot_guard.update_retry_counter(tx.clone()).await;
                 bot_guard.update_retry_pending(tx.clone(), false).await;
                 drop(bot_guard);

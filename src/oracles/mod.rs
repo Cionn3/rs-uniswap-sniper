@@ -6,7 +6,7 @@ use crate::bot::{ send_tx::send_tx, remove_tx_from_oracles };
 use crate::utils::{ constants::*, helpers::* };
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use anyhow::anyhow;
 
 pub mod block_oracle;
@@ -19,7 +19,7 @@ pub mod fork_db_oracle;
 
 // monitor the status of the oracles
 pub fn oracle_status(
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
 ) {
     tokio::spawn(async move {
         // print the status of the oracles every 15 seconds
@@ -27,7 +27,7 @@ pub fn oracle_status(
         loop {
             tokio::time::sleep(sleep).await;
 
-            let bot_guard = bot.lock().await;
+            let bot_guard = bot.read().await;
             let sell_oracle_txs = bot_guard.get_sell_oracle_tx_len().await;
             let anti_rug_oracle_txs = bot_guard.get_anti_rug_oracle_tx_len().await;
             drop(bot_guard);
@@ -44,7 +44,7 @@ pub async fn time_check(
     client: Arc<Provider<Ws>>,
     next_block: BlockInfo,
     snipe_tx: SnipeTx,
-    bot: Arc<Mutex<Bot>>,
+    bot: Arc<RwLock<Bot>>,
     blocks_passed: U64,
     current_amount_out_weth: U256
 ) -> Result<(), anyhow::Error> {
@@ -112,11 +112,11 @@ pub async fn take_profit(
     client: Arc<Provider<Ws>>,
     snipe_tx: SnipeTx,
     next_block: BlockInfo,
-    bot: Arc<Mutex<Bot>>
+    bot: Arc<RwLock<Bot>>
 ) -> Result<(), anyhow::Error> {
     
     // get the fork db
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let fork_db = bot_guard.get_fork_db().await;
     drop(bot_guard);
 
@@ -129,7 +129,7 @@ pub async fn take_profit(
     )?;
 
     // update tx to pending
-    let mut bot_guard = bot.lock().await;
+    let mut bot_guard = bot.write().await;
     bot_guard.set_tx_is_pending(snipe_tx.clone(), true).await;
     let nonce = bot_guard.get_nonce().await;
     drop(bot_guard);
@@ -142,12 +142,12 @@ pub async fn take_profit(
         log::info!("Expected amount: {:?}", convert_wei_to_ether(tx_data.expected_amount));
 
         // update status
-        let mut bot_guard = bot.lock().await;
+        let mut bot_guard = bot.write().await;
         bot_guard.set_tx_is_pending(snipe_tx.clone(), false).await;
         bot_guard.update_got_initial_out(snipe_tx, true).await;
         drop(bot_guard);
     } else {
-        let mut bot_guard = bot.lock().await;
+        let mut bot_guard = bot.write().await;
         bot_guard.set_tx_is_pending(snipe_tx.clone(), false).await;
         bot_guard.update_got_initial_out(snipe_tx, false).await;
         drop(bot_guard);
@@ -162,11 +162,11 @@ pub async fn process_tx(
     client: Arc<Provider<Ws>>,
     snipe_tx: SnipeTx,
     next_block: BlockInfo,
-    bot: Arc<Mutex<Bot>>
+    bot: Arc<RwLock<Bot>>
 ) -> Result<(), anyhow::Error> {
     
     // get the fork db
-    let bot_guard = bot.lock().await;
+    let bot_guard = bot.read().await;
     let fork_db = bot_guard.get_fork_db().await;
     drop(bot_guard);
 
@@ -190,7 +190,7 @@ pub async fn process_tx(
     }
 
     // get the nonce and update it
-    let mut bot_guard = bot.lock().await;
+    let mut bot_guard = bot.write().await;
     let nonce = bot_guard.get_nonce().await;
     drop(bot_guard);
 
