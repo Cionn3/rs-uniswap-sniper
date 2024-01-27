@@ -3,7 +3,6 @@ use tokio::sync::broadcast::Sender;
 
 use ethers::prelude::*;
 use tokio::sync::RwLock;
-use crate::utils::types::events::NewBlockEvent;
 
 
 
@@ -105,7 +104,7 @@ impl BlockOracle {
 // * `oracle`: oracle to update
 pub fn start_block_oracle(
     oracle: &mut Arc<RwLock<BlockOracle>>,
-    new_block_sender: Sender<NewBlockEvent>
+    new_block_sender: Sender<BlockInfo>
 ) {
     let next_block_clone = oracle.clone();
 
@@ -137,10 +136,8 @@ pub fn start_block_oracle(
 
                     // send the new block through channel
                     new_block_sender
-                        .send(NewBlockEvent::NewBlock {
-                            latest_block: latest_block.clone(),
-                        })
-                        .unwrap();
+                        .send(latest_block.clone())
+                        .expect("Failed to send new block through channel");
                 } // remove write lock due to being out of scope here
             }
         }

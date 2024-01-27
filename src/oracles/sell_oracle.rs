@@ -7,10 +7,9 @@ use crate::utils::helpers::*;
 
 use crate::utils::constants::*;
 use crate::bot:: remove_tx_from_oracles;
-use super::process_tx;
-use super::{ time_check, take_profit };
+use super::{ time_check, take_profit, process_tx };
 
-use crate::utils::types::{ structs::bot::Bot, events::* };
+use crate::utils::types::structs::bot::Bot;
 use crate::oracles::block_oracle::BlockInfo;
 use crate::utils::evm::simulate::sim::simulate_sell;
 
@@ -19,7 +18,7 @@ use crate::utils::evm::simulate::sim::simulate_sell;
 // ** Running swap simulations on every block to keep track of the selling price
 pub fn start_sell_oracle(
     bot: Arc<RwLock<Bot>>,
-    mut new_block_receiver: broadcast::Receiver<NewBlockEvent>
+    mut new_block_receiver: broadcast::Receiver<BlockInfo>
 ) {
     tokio::spawn(async move {
         loop {
@@ -27,14 +26,12 @@ pub fn start_sell_oracle(
                 Ok(client) => client,
                 Err(e) => {
                     log::error!("Failed to create local client: {:?}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     continue;
                 }
             };
 
-            while let Ok(event) = new_block_receiver.recv().await {
-                let latest_block = match event {
-                    NewBlockEvent::NewBlock { latest_block } => latest_block,
-                };
+            while let Ok(latest_block) = new_block_receiver.recv().await {
 
                 match process(bot.clone(), client.clone(), latest_block).await {
                     Ok(_) => log::trace!("Tx Sent Successfully"),
@@ -105,16 +102,15 @@ async fn process(
                 next_block.clone(),
                 tx.clone(),
                 bot.clone(),
-                blocks_passed,
-                current_amount_out
+                blocks_passed
             ).await.expect("Failed to do time check");
 
             // ** if we hit our initial profit take target take the initial amount in out + buy cost
             // ** take the initial out only once
             if tx.got_initial_out == false {
-                // see if the tx is pending
-                if tx.is_pending == true {
-                    return;
+                
+                if tx.is_pending {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }
 
                 // first check just in case if the token pumped to the moon
@@ -144,7 +140,7 @@ async fn process(
 
             // if we dont met target price, skip
             if current_amount_out < tx.target_amount_weth {
-                log::info!("Token {:?} amount in {:?} ETH, current amount out {:?} ETH ",
+                log::info!("Token {:?} amount in {} ETH, current amount out {} ETH ",
                     tx.pool.token_1,
                     convert_wei_to_ether(tx.amount_in),
                     convert_wei_to_ether(current_amount_out)

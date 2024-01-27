@@ -3,6 +3,7 @@ use tokio::sync::broadcast::Sender;
 
 use crate::utils::types::events::MemPoolEvent;
 use crate::utils::helpers::*;
+use crate::utils::constants::*;
 
 pub fn start_mempool_stream(new_tx_sender: Sender<MemPoolEvent>) {
     tokio::spawn(async move {
@@ -11,7 +12,7 @@ pub fn start_mempool_stream(new_tx_sender: Sender<MemPoolEvent>) {
                 Ok(client) => client,
                 Err(e) => {
                     log::error!("Failed to create local client: {}", e);
-                    // we reconnect by restarting the loop
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     continue;
                 }
             };
@@ -20,13 +21,14 @@ pub fn start_mempool_stream(new_tx_sender: Sender<MemPoolEvent>) {
                 stream
             } else {
                 log::error!("Failed to create new block stream");
-                // we reconnect by restarting the loop
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 continue;
             };
 
             while let Some(tx) = mempool_stream.next().await {
-                // exclude our own transactions
-                if tx.from == get_my_address() || tx.from == get_admin_address() {
+
+                // exclude our own addresses
+                if tx.from == *CALLER_ADDRESS || tx.from == *ADMIN_ADDRESS {
                     continue;
                 }
 

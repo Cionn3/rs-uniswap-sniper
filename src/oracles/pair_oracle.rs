@@ -9,8 +9,6 @@ use crate::utils::constants::*;
 use crate::utils::evm::simulate::sim::get_pair;
 
 
-const PAIR_CREATED_ABI: &str =
-    "[{\"anonymous\":false,\"inputs\":[{\"indexed\":true,\"name\":\"token0\",\"type\":\"address\"},{\"indexed\":true,\"name\":\"token1\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"pair\",\"type\":\"address\"},{\"indexed\":false,\"name\":\"\",\"type\":\"uint256\"}],\"name\":\"PairCreated\",\"type\":\"event\"}]";
 
 // Monitor pending txs for new pairs created
 pub fn start_pair_oracle(
@@ -25,19 +23,6 @@ pub fn start_pair_oracle(
             let transfer_id: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
             let approve: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
 
-            // ** Load Burn and Sync events ABI
-            let abi = load_abi_from_file("../../src/utils/abi/IUniswapV2Pair.abi").expect(
-                "Failed to load ABI"
-            );
-
-            // Load the ABI into an ethabi::Contract
-            let contract = ethabi::Contract::load(abi.as_bytes()).expect("Failed to load contract");
-            let load_pair_created_event = ethabi::Contract
-                ::load(PAIR_CREATED_ABI.as_bytes())
-                .unwrap();
-            let pair_created_event = load_pair_created_event.event("PairCreated").unwrap();
-            let sync_event_abi = contract.event("Sync").expect("Failed to extract Sync event");
-            let mint_event_abi = contract.event("Mint").expect("Failed to extract Mint event");
 
             while let Ok(event) = new_mempool_receiver.recv().await {
                 let tx = match event {
@@ -63,18 +48,12 @@ pub fn start_pair_oracle(
                 drop(bot_guard);
 
                 let new_pair_sender = new_pair_sender.clone();
-                let sync_event_abi = sync_event_abi.clone();
-                let mint_event_abi = mint_event_abi.clone();
-                let pair_created_event = pair_created_event.clone();
 
                 // now we need to simulate the tx with revm to get the pair address from the logs
                 let (pool_address, weth, token_1, weth_reserve) = match
                     get_pair(
                         next_block,
                         &tx,
-                        sync_event_abi,
-                        mint_event_abi,
-                        pair_created_event,
                         fork_db
                     )
                 {

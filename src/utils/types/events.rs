@@ -1,16 +1,7 @@
 use super::structs::pool::Pool;
-use crate::oracles::block_oracle::BlockInfo;
 use ethers::types::Transaction;
 
 
-
-// New block event from the block oracle
-#[derive(Debug, Clone)]
-pub enum NewBlockEvent {
-    NewBlock {
-        latest_block: BlockInfo,
-    },
-}
 
 // New pair event from the pair oracle
 #[derive(Debug, Clone)]

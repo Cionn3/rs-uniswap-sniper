@@ -4,7 +4,7 @@ use crate::oracles::{
     oracle_status,
     mempool_stream::start_mempool_stream,
     pair_oracle::start_pair_oracle,
-    block_oracle::{ BlockOracle, start_block_oracle },
+    block_oracle::{ start_block_oracle, BlockInfo, BlockOracle },
     sell_oracle::start_sell_oracle,
     anti_rug_oracle::{ start_anti_rug, start_anti_honeypot },
     nonce_oracle::start_nonce_oracle,
@@ -62,7 +62,7 @@ pub async fn start(client: Arc<Provider<Ws>>) {
     let new_pair_receiver = new_pair_sender.0.subscribe();
 
     // new block event channel
-    let new_block_sender = broadcast::channel::<NewBlockEvent>(1000); // buffer size 1000
+    let new_block_sender = broadcast::channel::<BlockInfo>(1000); // buffer size 1000
     let new_block_receiver_2 = new_block_sender.0.subscribe();
     let new_block_receiver_3 = new_block_sender.0.subscribe();
     let new_block_receiver_4 = new_block_sender.0.subscribe();

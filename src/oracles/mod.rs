@@ -45,8 +45,7 @@ pub async fn time_check(
     next_block: BlockInfo,
     snipe_tx: SnipeTx,
     bot: Arc<RwLock<Bot>>,
-    blocks_passed: U64,
-    current_amount_out_weth: U256
+    blocks_passed: U64
 ) -> Result<(), anyhow::Error> {
     let is_10_min_passed = blocks_passed == (50u64).into();
     let is_20_min_passed = blocks_passed == (100u64).into();
@@ -65,37 +64,39 @@ pub async fn time_check(
         return Ok(());
     }
 
-    let target_price_difference;
+    let reserve_difference;
+
+    let current_reserve = get_reserves(snipe_tx.pool.address.clone(), client.clone()).await?;
 
     if is_10_min_passed {
-        // ** if 10 mins passed, set the target price to 30% up
-        target_price_difference = (snipe_tx.amount_in * 130) / 100;
+        // ** if 10 mins passed, set the target reserve to 20% up
+        reserve_difference = (snipe_tx.pool.weth_liquidity * 120) / 100;
         log::info!("10min check is triggered for {:?}", snipe_tx.pool.token_1);
     } else if is_20_min_passed {
-        // ** if 20 mins passed, set the target price to 60% up
-        target_price_difference = (snipe_tx.amount_in * 160) / 100;
+        // ** if 20 mins passed, set the target reserve to 30% up
+        reserve_difference = (snipe_tx.pool.weth_liquidity * 130) / 100;
         log::info!("20min check is triggered for {:?}", snipe_tx.pool.token_1);
     } else if is_40_min_passed {
-        // ** if 40 mins passed, set the target price to 100% up
-        target_price_difference = (snipe_tx.amount_in * 200) / 100;
+        // ** if 40 mins passed, set the target reserve to 100% up
+        reserve_difference = (snipe_tx.pool.weth_liquidity * 200) / 100;
         log::info!("40min check is triggered for {:?}", snipe_tx.pool.token_1);
     } else if is_60_min_passed {
         // ** if 60 mins passed, set the target price to 200% up
-        target_price_difference = (snipe_tx.amount_in * 300) / 100;
+        reserve_difference = (snipe_tx.pool.weth_liquidity * 300) / 100;
         log::info!("60min check is triggered for {:?}", snipe_tx.pool.token_1);
     } else if is_8_hours_passed {
         // ** if 8 hours passed, set the target price to 800% up
-        target_price_difference = (snipe_tx.amount_in * 800) / 100;
+        reserve_difference = (snipe_tx.pool.weth_liquidity * 900) / 100;
         log::info!("8 hours check is triggered for {:?}", snipe_tx.pool.token_1);
     } else {
         return Ok(());
     }
 
-    // ** If current_amount_out_weth is not at target price
-    let is_price_met = current_amount_out_weth >= target_price_difference;
+    // ** check if the reserve is met
+    let is_reserve_met = current_reserve >= reserve_difference;
 
     // ** if price is not met Sell
-    if !is_price_met {
+    if !is_reserve_met {
         // sell the token
         process_tx(
             client.clone(),
@@ -139,7 +140,7 @@ pub async fn take_profit(
 
     if is_bundle_included {
         log::info!("Bundle included, took profit for {:?}", snipe_tx.pool.token_1);
-        log::info!("Expected amount: {:?}", convert_wei_to_ether(tx_data.expected_amount));
+        log::info!("Expected amount: {}", convert_wei_to_ether(tx_data.expected_amount));
 
         // update status
         let mut bot_guard = bot.write().await;
@@ -205,7 +206,7 @@ pub async fn process_tx(
 
     if is_bundle_included {
         log::info!(
-            "Bundle included, sold token {:?} for {:?} ETH",
+            "Bundle included, sold token {:?} for {} ETH",
             snipe_tx.pool.token_1,
             convert_wei_to_ether(tx_data.expected_amount)
         );

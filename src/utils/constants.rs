@@ -1,14 +1,35 @@
 use lazy_static::lazy_static;
-use ethers::types::{U256, Address};
-use super::helpers::get_weth_address;
+use ethers::prelude::*;
+use std::str::FromStr;
 
 
+// ** Addresses **
+lazy_static!{
+    pub static ref WETH: Address = Address::from_str("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2").unwrap();
+
+    // the address which you sign the transactions and call the contract
+    pub static ref CALLER_ADDRESS: Address = Address::from_str("0xYOUR_ADDRESS").unwrap();
+
+    // The address which you withdraw the profits to
+    pub static ref ADMIN_ADDRESS: Address = Address::from_str("0xYOUR_ADDRESS").unwrap();
+
+    pub static ref CALLER_WALLET: LocalWallet = get_my_wallet();
+
+    pub static ref FLASHBOT_IDENTITY: LocalWallet = get_flashbot_identity();
+
+    pub static ref FLASHBOT_SEARCHER: LocalWallet = get_flashbot_searcher();
+
+    // the address of the snipe contract
+    pub static ref CONTRACT_ADDRESS: Address = Address::from_str("0xCONTRACT_ADDRESS").unwrap();
+
+    // Locally inserted contract
+    pub static ref SWAPPER_ADDRESS: Address = Address::from_str("00000000000000000000000000000000F3370000").unwrap();
+}
 
 
+// ** BOT SETTINGS **
 lazy_static! {
-    pub static ref WETH: Address = get_weth_address();
 
-    // ** BOT SETTINGS **
 
     // change these settings as you like
 
@@ -65,4 +86,27 @@ lazy_static! {
     pub static ref MAX_WETH_RESERVE: U256 = U256::from(4000000000000000000u128);
 
     
+}
+
+
+
+// wallet used to sign the trasnactions and call the contract
+// fill in your private key here
+pub fn get_my_wallet() -> LocalWallet {
+    let private_key: String = "0xYOUR_PRIVATE_KEY"
+        .parse()
+        .expect("private key wrong format?");
+    private_key.parse::<LocalWallet>().expect("Failed to parse private key")
+}
+
+// flashbot identity , could also be a random private key
+pub fn get_flashbot_identity() -> LocalWallet {
+    let private_key: String = "0xYOUR_PRIVATE_KEY".to_string();
+    private_key.parse::<LocalWallet>().expect("Failed to parse flashbot signer private key")
+}
+
+// flashbot searcher signer, must be the same private key as the wallet used to sign the tx
+pub fn get_flashbot_searcher() -> LocalWallet {
+    let private_key: String = "0xYOUR_PRIVATE_KEY".to_string();
+    private_key.parse::<LocalWallet>().expect("Failed to parse flashbot identity private key")
 }

@@ -1,12 +1,17 @@
 use ethers::prelude::*;
-use revm::primitives::{ ExecutionResult, Output, TransactTo, U256 as rU256, B160 as rAddress };
+use revm::primitives::{
+    TransactTo,
+    U256 as rU256,
+    B160 as rAddress
+};
 use anyhow::anyhow;
 use super::*;
 use crate::{ forked_db::fork_db::ForkDB, utils::types::structs::tx_data::TxData };
 use crate::oracles::block_oracle::BlockInfo;
 use ethers::abi::Tokenizable;
-use ethabi::{ RawLog, Event };
-use crate::utils::constants::*;
+use ethabi::RawLog;
+
+use crate::utils::abi::*;
 use crate::utils::types::structs::snipe_tx::SnipeTx;
 use crate::utils::types::structs::pool::Pool;
 
@@ -45,21 +50,20 @@ pub fn find_amount_in(
         evm.database(fork_db.clone());
 
         // setup the next block state
-        setup_block_state(&mut evm, next_block);
-        disable_checks(&mut evm);
+        setup_evm(&mut evm, next_block);
 
         if let Some(ref tx) = pending_tx {
             // first simulate and commit the pending tx so we can buy the token
-            commit_pending_tx(&mut evm, &tx)?;
+            evm.env.tx.value = tx.value.into();
+            let _ = sim_call(tx.from, tx.to.unwrap_or_default(), tx.input.clone(), true, &mut evm)?;
         }
 
-        let (is_buy_reverted, _, _) = commit_tx(
-            &mut evm,
+        let (is_buy_reverted, _, _) = sim_call(
+            *CALLER_ADDRESS,
+            *CONTRACT_ADDRESS,
             call_data.clone().into(),
-            get_my_address(), // caller
-            get_snipe_contract_address(), // transact to
-            false, // dont apply state changes to db
-            next_block
+            false,
+            &mut evm
         )?;
 
         if is_buy_reverted {
@@ -89,15 +93,6 @@ pub fn find_amount_in(
     return Ok(amount_in);
 }
 
-
-
-
-
-
-
-
-
-
 // Checks if the token has taxes
 // we use a resonable amount of weth cause of the price impact
 // ** We also do HoneyPot checks **
@@ -112,13 +107,13 @@ pub fn tax_check(
     evm.database(fork_db.clone());
 
     // setup the next block state
-    setup_block_state(&mut evm, next_block);
-    disable_checks(&mut evm);
+    setup_evm(&mut evm, next_block);
 
     // if we have a pending tx simulate it
     if let Some(tx) = pending_tx.clone() {
         // commit the pending tx so we can buy the token
-        commit_pending_tx(&mut evm, &tx)?;
+        evm.env.tx.value = tx.value.into();
+        let _ = sim_call(tx.from, tx.to.unwrap_or_default(), tx.input.clone(), true, &mut evm)?;
     }
 
     // ** create the call_data for the swap
@@ -130,13 +125,12 @@ pub fn tax_check(
         U256::from(0u128)
     );
 
-    let (is_buy_reverted, logs, _) = commit_tx(
-        &mut evm,
-        call_data.into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        true, // apply state changes to db
-        next_block
+    let (is_buy_reverted, logs, _) = sim_call(
+        *CALLER_ADDRESS,
+        *CONTRACT_ADDRESS,
+        call_data.clone().into(),
+        false,
+        &mut evm
     )?;
 
     // if the swap is reverted usually there is 2 reasons
@@ -149,20 +143,14 @@ pub fn tax_check(
     }
 
     // ** we check the logs to see the actual amount of tokens the pool is gonna send us
-
-    let (real_amount, amount_from_swap) = get_real_amount_from_logs(
-        logs,
-        pool.address,
-        get_swap_event(),
-        get_transfer_event()
-    )?;
+    let (real_amount, amount_from_swap) = get_real_amount_from_logs(logs, pool.address)?;
 
     // if the actual amount of tokens is less than 70% of the amount we should receive
     // then we skip the token
     if real_amount < (amount_from_swap * 7) / 10 {
         log::error!("Amount From Swap {:?}", amount_from_swap);
         log::error!("Real Amount {:?}", real_amount);
-        return Ok(false)
+        return Ok(false);
     }
 
     // ** Do the sell Transaction **
@@ -181,13 +169,12 @@ pub fn tax_check(
     evm.env.block.timestamp = (next_block.timestamp + U256::from(12u128)).into();
 
     // ** Simulate sell
-    let (is_sell_reverted, _, _) = commit_tx(
-        &mut evm,
+    let (is_sell_reverted, logs, _) = sim_call(
+        *CALLER_ADDRESS,
+        *CONTRACT_ADDRESS,
         call_data.clone().into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        false, // dont apply state changes to db
-        next_block
+        false,
+        &mut evm
     )?;
 
     // see if the tx is revrted
@@ -196,60 +183,22 @@ pub fn tax_check(
         return Ok(false);
     }
 
-    // ** Try to Sell 200 blocks further
-    evm.env.block.number = rU256::from(next_block.number.as_u64() + 200);
-    evm.env.block.timestamp = (next_block.timestamp + U256::from(2400u128)).into();
-
-    // ** Simulate sell
-    let (is_sell_reverted, logs, _) = commit_tx(
-        &mut evm,
-        call_data.into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        false, // dont apply state changes to db
-        next_block
-    )?;
-
-    // same as above
-    if is_sell_reverted {
-        log::warn!("Sell reverted After 200 blocks {:?}", pool.token_1);
-        return Ok(false);
-    }
-
     // ** check the amount of weth we are going to receive
-    let (real_weth_amount, _) = get_real_amount_from_logs(
-        logs,
-        pool.address,
-        get_swap_event(),
-        get_transfer_event()
-    )?;
-
+    let (real_weth_amount, _) = get_real_amount_from_logs(logs, pool.address)?;
 
     // if the actual amount of weth is less than 70% of the amount in weth
     // then we skip the token
     if real_weth_amount < (amount_in_weth * 7) / 10 {
-        log::error!("Amount In Weth {:?}", convert_wei_to_ether(amount_in_weth));
-        log::error!("Real Weth Amount out {:?}", convert_wei_to_ether(real_weth_amount));
-        return Ok(false)
+        log::error!("Amount In Weth {}", convert_wei_to_ether(amount_in_weth));
+        log::error!("Real Weth Amount out {}", convert_wei_to_ether(real_weth_amount));
+        return Ok(false);
     }
 
     // ** Passed All Checks **
     Ok(true)
 }
 
-
-
-
-
-
-
-
-
-
-
 // ** Generate Call Data **
-// This function generates the call data for the swap
-
 pub fn generate_tx_data(
     pool: &Pool,
     amount_in_weth: U256,
@@ -264,13 +213,12 @@ pub fn generate_tx_data(
     evm.database(fork_db.clone());
 
     // setup the next block state
-    setup_block_state(&mut evm, next_block);
-    disable_checks(&mut evm);
+    setup_evm(&mut evm, next_block);
 
     // if we have a pending tx simulate it
     if let Some(ref tx) = pending_tx {
-        // first simulate and commit the pending tx so we can buy the token
-        commit_pending_tx(&mut evm, tx)?;
+        evm.env.tx.value = tx.value.into();
+        let _ = sim_call(tx.from, tx.to.unwrap_or_default(), tx.input.clone(), true, &mut evm)?;
     }
 
     // generate call data based on whether we buy or sell
@@ -279,30 +227,40 @@ pub fn generate_tx_data(
         amount_in_weth,
         U256::zero(), // minimum received
         do_we_buy,
-        next_block,
         &mut evm
     )?;
 
-    // commit tx
-    let (access_list, logs, gas_used) = commit_tx_with_access_list(
-        &mut evm,
+    // ** Generate Access List
+    let mut access_list_inspector = AccessListInspector::new(*CALLER_ADDRESS, *CONTRACT_ADDRESS);
+
+    // setup fields
+    evm.env.tx.caller = rAddress::from(CALLER_ADDRESS.0);
+    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(CONTRACT_ADDRESS.0));
+    evm.env.tx.data = call_data.clone().into();
+
+    // sim tx to get access list
+    evm
+        .inspect_ref(&mut access_list_inspector)
+        .map_err(|e| anyhow!("Error generating Access List: {:?}", e))?;
+
+    let access_list = access_list_inspector.into_access_list();
+
+    // set access list to evm
+    evm.env.tx.access_list = access_list.clone();
+    // simulate call
+    let (_, logs, gas_used) = sim_call(
+        *CALLER_ADDRESS,
+        *CONTRACT_ADDRESS,
         call_data.into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        false, // dont apply state changes to db
-        next_block
+        false,
+        &mut evm
     )?;
 
     // calculate total gas cost for the transaction
     let gas_cost = (next_block.base_fee + miner_tip) * gas_used;
 
     // get the real amount of tokens received
-    let (amount_received, _) = get_real_amount_from_logs(
-        logs,
-        pool.address,
-        get_swap_event(),
-        get_transfer_event()
-    )?;
+    let (amount_received, _) = get_real_amount_from_logs(logs, pool.address)?;
 
     let minimum_received =
         (amount_received * U256::from(*BUY_NUMERATOR)) / U256::from(*BUY_DENOMINATOR);
@@ -313,7 +271,6 @@ pub fn generate_tx_data(
         amount_in_weth,
         minimum_received,
         do_we_buy,
-        next_block,
         &mut evm
     )?;
 
@@ -335,7 +292,7 @@ pub fn generate_tx_data(
         minimum_received,
         pending_tx.unwrap_or(Transaction::default()),
         U256::from(frontrun_or_backrun),
-        access_list
+        convert_access_list(access_list)
     );
 
     Ok((snipe_tx, tx_data))
@@ -354,19 +311,18 @@ pub fn simulate_sell(
     evm.database(fork_db);
 
     // setup the next block state
-    setup_block_state(&mut evm, &next_block);
-    disable_checks(&mut evm);
+    setup_evm(&mut evm, &next_block);
 
     // if we have a pending tx simulate it
     if let Some(tx) = tx.clone() {
-        commit_pending_tx(&mut evm, &tx)?;
+        evm.env.tx.value = tx.value.into();
+        let _ = sim_call(tx.from, tx.to.unwrap_or_default(), tx.input.clone(), true, &mut evm)?;
     }
 
     // ** get the token balance for the amount_in to sell
-    let amount_in = get_balance_of_evm(
-        pool.token_1, // token1 is always a shitcoin
-        get_snipe_contract_address(),
-        &next_block,
+    let amount_in = get_erc20_balance(
+        pool.token_1, // shitcoin
+        *CONTRACT_ADDRESS,
         &mut evm
     )?;
 
@@ -380,14 +336,14 @@ pub fn simulate_sell(
     );
 
     // ** Simulate the Sell Transaction
-    let (reverted, logs, _) = commit_tx(
-        &mut evm,
-        call_data.into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        true, // apply state changes to db
-        &next_block
+    let (reverted, logs, _) = sim_call(
+        *CALLER_ADDRESS,
+        *CONTRACT_ADDRESS,
+        call_data.clone().into(),
+        false,
+        &mut evm
     )?;
+    
 
     // if the tx is reverted we return 0
     // cause it will produce no logs
@@ -400,8 +356,6 @@ pub fn simulate_sell(
     let (weth_amount, _) = get_real_amount_from_logs(
         logs,
         pool.address,
-        get_swap_event(),
-        get_transfer_event()
     )?;
 
     return Ok(weth_amount);
@@ -420,8 +374,7 @@ pub fn profit_taker(
     evm.database(fork_db.clone());
 
     // setup the next block state
-    setup_block_state(&mut evm, &next_block);
-    disable_checks(&mut evm);
+    setup_evm(&mut evm, &next_block);
 
     // ** a simple way to find out how much tokens to sell
     // ** is to simulate a buy transaction at the current state
@@ -429,7 +382,7 @@ pub fn profit_taker(
 
     // ** create the call_data for the swap
     let call_data = encode_swap(
-        get_weth_address(), // input
+        *WETH, // input
         pool.token_1, // output
         pool.address,
         amount_in,
@@ -437,48 +390,60 @@ pub fn profit_taker(
     );
 
     // ** Simulate the Buy Transaction
-    let (_, logs, _) = commit_tx(
-        &mut evm,
-        call_data.into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        false, // dont apply state changes to db
-        &next_block
+    let (_, logs, _) = sim_call(
+        *CALLER_ADDRESS,
+        *CONTRACT_ADDRESS,
+        call_data.clone().into(),
+        false,
+        &mut evm
     )?;
 
     // get the real amount of tokens we are going to receive
     let (mut amount_of_tokens_to_sell, _) = get_real_amount_from_logs(
         logs,
-        pool.address,
-        get_swap_event(),
-        get_transfer_event()
+        pool.address
     )?;
 
     // encode the sell call data
     let call_data = encode_swap(
         pool.token_1, // input
-        get_weth_address(), // output
+        *WETH, // output
         pool.address,
         amount_of_tokens_to_sell,
         U256::from(0u128)
     );
 
+    // ** Generate Access List
+    let mut access_list_inspector = AccessListInspector::new(*CALLER_ADDRESS, *CONTRACT_ADDRESS);
+
+    // setup fields
+    evm.env.tx.caller = rAddress::from(CALLER_ADDRESS.0);
+    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(CONTRACT_ADDRESS.0));
+    evm.env.tx.data = call_data.clone().into();
+
+    // sim tx to get access list
+    evm
+        .inspect_ref(&mut access_list_inspector)
+        .map_err(|e| anyhow!("Error generating Access List: {:?}", e))?;
+
+    let access_list = access_list_inspector.into_access_list();
+
+    // set access list to evm
+    evm.env.tx.access_list = access_list.clone();
+
     // ** simulate the sell tx
-    let (access_list, logs, gas_used) = commit_tx_with_access_list(
-        &mut evm,
-        call_data.into(),
-        get_my_address(), // caller
-        get_snipe_contract_address(), // transact to
-        false, // dont apply state changes to db
-        &next_block
+    let (_, logs, gas_used) = sim_call(
+        *CALLER_ADDRESS,
+        *CONTRACT_ADDRESS,
+        call_data.clone().into(),
+        false,
+        &mut evm
     )?;
 
     // ** get the amount of weth we are going to receive
     let (real_amount_weth, _) = get_real_amount_from_logs(
         logs,
-        pool.address,
-        get_swap_event(),
-        get_transfer_event()
+        pool.address
     )?;
 
     // make sure the real_amount_weth is not less than the initial amount
@@ -494,7 +459,7 @@ pub fn profit_taker(
     // encode the final call data
     let call_data = encode_swap(
         pool.token_1, // input
-        get_weth_address(), // output
+        *WETH, // output
         pool.address,
         amount_of_tokens_to_sell,
         minimum_received
@@ -506,21 +471,12 @@ pub fn profit_taker(
         gas_used,
         minimum_received,
         Transaction::default(),
-        U256::from(0u128), // 0 because we dont frontrun or back run
-        access_list
+        U256::from(2u128), // 2 because we dont frontrun or back run
+        convert_access_list(access_list)
     );
 
     Ok(tx_data)
 }
-
-
-
-
-
-
-
-
-
 
 // Get touched pools from a pending transaction
 pub fn get_touched_pools(
@@ -534,23 +490,15 @@ pub fn get_touched_pools(
     evm.database(fork_db);
 
     // setup the next block state
-    setup_block_state(&mut evm, next_block);
-    disable_checks(&mut evm);
-
+    setup_evm(&mut evm, next_block);
 
     // simulate the pending tx
     evm.env.tx.caller = rAddress::from_slice(&tx.from.0);
     evm.env.tx.transact_to = TransactTo::Call(rAddress::from_slice(&tx.to.unwrap_or_default().0));
     evm.env.tx.data = tx.input.0.clone();
     evm.env.tx.value = tx.value.into();
-    evm.env.tx.gas_limit = 5000000;
 
-    let res = match evm.transact_ref() {
-        Ok(result) => result,
-        Err(e) => {
-            return Err(anyhow!("Failed to commit pending tx for touched pools: {:?}", e));
-        }
-    };
+    let res = evm.transact_ref()?;
 
     // get the touched accs
     let touched_accs = res.state.keys();
@@ -574,19 +522,10 @@ pub fn get_touched_pools(
     Ok(Some(touched_pools))
 }
 
-
-
-
-
-
-
 // Gets a new pair from a pending transaction
 pub fn get_pair(
     next_block: BlockInfo,
     tx: &Transaction,
-    sync_event: Event,
-    mint_event: Event,
-    pair_created_event: Event,
     fork_db: ForkDB
 ) -> Result<(Address, Address, Address, U256), anyhow::Error> {
     // setup an evm instance
@@ -594,40 +533,17 @@ pub fn get_pair(
     evm.database(fork_db);
 
     // setup block state
-    setup_block_state(&mut evm, &next_block);
-    disable_checks(&mut evm);
+    setup_evm(&mut evm, &next_block);
 
-
-    // simulate tx
-    evm.env.tx.caller = rAddress::from_slice(&tx.from.0);
-    evm.env.tx.transact_to = TransactTo::Call(rAddress::from_slice(&tx.to.unwrap_or_default().0));
-    evm.env.tx.data = tx.input.0.clone();
+    // simulate pending tx
     evm.env.tx.value = tx.value.into();
-    evm.env.tx.gas_limit = 5000000;
-
-    let res = match evm.transact_ref() {
-        Ok(result) => result.result,
-        Err(e) => {
-            return Err(anyhow!("Failed to commit GetPair tx: {:?}", e));
-        }
-    };
-
-    // get the logs from the tx
-    let logs = res.logs();
-
-    let _output: Bytes = match res {
-        ExecutionResult::Success { output, .. } =>
-            match output {
-                Output::Call(o) => o.into(),
-                Output::Create(o, _) => o.into(),
-            }
-        ExecutionResult::Revert { output, .. } => {
-            return Err(anyhow!("GetPair with tx hash {:?}  reverted: {:?}", tx.hash, output));
-        }
-        ExecutionResult::Halt { reason, .. } => {
-            return Err(anyhow!("GetPair with tx hash {:?}  halted: {:?}", tx.hash, reason));
-        }
-    };
+    let (_, logs, _) = sim_call(
+        tx.from,
+        tx.to.unwrap_or_default(),
+        tx.input.clone(),
+        true,
+        &mut evm,
+    )?;
 
     // ** define empty addresses
     let mut token_0 = Address::zero();
@@ -652,7 +568,7 @@ pub fn get_pair(
 
         // Check for PairCreated event
         if
-            let Ok(decoded_log) = pair_created_event.parse_log(RawLog {
+            let Ok(decoded_log) = PAIR_CREATED_EVENT.parse_log(RawLog {
                 topics: converted_topics.clone(),
                 data: log.data.clone().to_vec(),
             })
@@ -662,7 +578,7 @@ pub fn get_pair(
 
         // Check for Mint event
         if
-            let Ok(decoded_log) = mint_event.parse_log(RawLog {
+            let Ok(decoded_log) = MINT_EVENT.parse_log(RawLog {
                 topics: converted_topics.clone(),
                 data: log.data.clone().to_vec(),
             })
@@ -673,7 +589,7 @@ pub fn get_pair(
 
         // Check for Sync event
         if
-            let Ok(decoded_log) = sync_event.parse_log(RawLog {
+            let Ok(decoded_log) = SYNC_EVENT.parse_log(RawLog {
                 topics: converted_topics.clone(),
                 data: log.data.clone().to_vec(),
             })
@@ -732,17 +648,12 @@ pub fn get_pair(
         }
 
         // if we got the pool address we can get the tokens by simulating a call to the pool contract
-        (token_0, token_1) = match simulate_token_call(pool_address, &mut evm.clone()) {
-            Ok(tokens) => tokens,
-            Err(e) => {
-                return Err(anyhow!("Failed to simulate token call: {:?}", e));
-            }
-        };
+        (token_0, token_1) = get_tokens_from_pool(pool_address, &mut evm.clone())?;
     }
 
     // ** determine which token is weth and its corrospending reserve
     // ** we want to return the weth token address as token_0
-    let (weth, token_1, weth_reserve) = if token_0 == get_weth_address() {
+    let (weth, token_1, weth_reserve) = if token_0 == *WETH {
         (token_0, token_1, reserve_0)
     } else {
         (token_1, token_0, reserve_1)

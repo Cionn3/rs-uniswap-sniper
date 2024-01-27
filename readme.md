@@ -24,7 +24,8 @@ We monitor the mempool for transactions that touch the token's pool. We can see 
 
 - Can almost detect all new pairs no matter the method they are created with.
 - Send the transaction directly to builders.
-- When we snipe a token, checks if we got a bad position and adjust target sell accordingly.
+- Keep track of the selling price on every block.
+- Takes the initial amount in + total gas fees out as profit once the selling price met the criteria.
 - Doesn't sell the token if the total gas cost is more than the WETH we are going to receive (see Anti-rug).
 - Extremely fast and accurate simulations thanks to `revm`.
 
@@ -32,13 +33,18 @@ We monitor the mempool for transactions that touch the token's pool. We can see 
 
 This repo is just for educational purposes only, showcasing some of the amazing capabilities of `revm` (what will happen after this state change, etc...).
 
+## Keep in mind
+
+- While the bot is technically working and doesn't crash there may still be some bugs that I haven't noticed.
+- Every information the bot holds for the tokens we bought is kept in memory if you restart the bot all the information will be lost and you will have to manually withdraw the tokens from the contract and sell them, use with caution!
+
 ## Usage
 
 If you want to try it:
 
 1. Go to `contracts/src/sniper.sol` and fill in your addresses.
 2. Deploy and fund your contract.
-3. Go to `src/utils/helpers.rs` and fill in your addresses and private keys.
+3. Go to `src/utils/constants.rs` and fill in your addresses and private keys.
 4. Compile with: `RUSTFLAGS="-C target-cpu=native" cargo build --profile maxperf`
 5. Navigate to the `target/maxperf`
 6. And run it: `./rs-uniswap-sniper`
@@ -80,7 +86,7 @@ If you want to try it:
 [08:54:37][INFO] Token: 0xdc19a59ba8308e4f55c1f24b11a63062a2733fbf initial amount in: BigDecimal("0.025") ETH, current amount out: BigDecimal("0.024850348962065471") ETH
 ```
 
-### Here we failed to catch the pending tx because he probably sent it directly to builders
+### Here we failed to catch the malicious pending tx because he probably sent it directly to builders
 ```
 hash: 0x6b56458f61e959d5bf3912fe1fd27bea9c2f9ec0736ef94a35d4bc8fa433dea1
 ```

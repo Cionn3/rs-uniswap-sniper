@@ -4,13 +4,14 @@ use ethers::prelude::*;
 use tokio::sync::RwLock;
 use std::sync::Arc;
 
+use crate::oracles::block_oracle::BlockInfo;
 use crate::utils::constants::*;
 use crate::utils::evm::simulate::sim::{ tax_check, generate_tx_data, find_amount_in };
 use crate::utils::helpers::*;
 use crate::utils::types::structs::snipe_tx::SnipeTx;
 use crate::bot::{ add_tx_to_oracles, remove_tx_from_oracles };
 use crate::utils::types::structs::{ bot::Bot, pool::Pool };
-use crate::utils::types::events::{ NewPairEvent, NewBlockEvent };
+use crate::utils::types::events::NewPairEvent;
 
 use super::send_tx::send_tx;
 
@@ -24,7 +25,7 @@ pub fn start_sniper(
                 Ok(client) => client,
                 Err(e) => {
                     log::error!("Failed to create local client: {}", e);
-                    // we reconnect by restarting the loop
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     continue;
                 }
             };
@@ -85,7 +86,7 @@ async fn process_tx(
         return Err(anyhow::anyhow!("Swap failed, sent to retry oracle"));
     }
 
-    log::info!("Sniping with miner tip: {:?}", convert_wei_to_gwei(*MINER_TIP_TO_SNIPE));
+    log::info!("Sniping with miner tip: {}", convert_wei_to_gwei(*MINER_TIP_TO_SNIPE));
 
     // ** Generate TxData
     let (snipe_tx, tx_data) = generate_tx_data(
@@ -132,7 +133,7 @@ async fn process_tx(
 
 pub fn snipe_retry(
     bot: Arc<RwLock<Bot>>,
-    mut new_block_receive: broadcast::Receiver<NewBlockEvent>
+    mut new_block_receive: broadcast::Receiver<BlockInfo>
 ) {
     tokio::spawn(async move {
         loop {
@@ -140,17 +141,14 @@ pub fn snipe_retry(
                 Ok(client) => client,
                 Err(e) => {
                     log::error!("Failed to create local client: {}", e);
-                    // we reconnect by restarting the loop
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     continue;
                 }
             };
 
             // start the oracle by subscribing to new blocks
-            while let Ok(event) = new_block_receive.recv().await {
-                let _latest_block = match event {
-                    NewBlockEvent::NewBlock { latest_block } => latest_block,
-                };
-
+            while let Ok(_latest_block) = new_block_receive.recv().await {
+                
                 match process_retry_tx(bot.clone(), client.clone()).await {
                     Ok(_) => log::trace!("Tx Sent Successfully"),
                     Err(e) => log::error!("Retry Snipe failed {:?}", e),
@@ -182,10 +180,6 @@ async fn process_retry_tx(
         let client = client.clone();
         let next_block = next_block.clone();
 
-        // if the tx is pending skip
-        if tx.retry_pending {
-            continue;
-        }
 
         // if we reached the retry limit remove tx from oracles
         if tx.snipe_retries >= *MAX_SNIPE_RETRIES {
@@ -216,6 +210,10 @@ async fn process_retry_tx(
 
         // spawn tasks
         tokio::spawn(async move {
+            if tx.is_pending {
+                // wait a little bit to get the response from builders
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            }
             // find the amount in in case the token has a min buy size
             let amount_in = find_amount_in(
                 &tx.pool,

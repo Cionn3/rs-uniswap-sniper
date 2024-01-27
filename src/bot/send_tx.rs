@@ -5,14 +5,15 @@ use std::sync::Arc;
 use tokio::task::JoinError;
 use ethers::prelude::*;
 use crate::oracles::block_oracle::BlockInfo;
-use crate::utils::types::structs::tx_data::TxData;
-use crate::utils::helpers::{
-    get_my_address,
-    get_my_wallet,
-    get_flashbot_identity,
-    get_flashbot_searcher,
-    sign_eip1559, get_snipe_contract_address,
+use crate::utils::constants::{
+    CALLER_ADDRESS,
+    CALLER_WALLET,
+    FLASHBOT_IDENTITY,
+    FLASHBOT_SEARCHER,
+    CONTRACT_ADDRESS,
 };
+use crate::utils::types::structs::tx_data::TxData;
+use crate::utils::helpers::sign_eip1559;
 
 #[allow(unused_assignments)]
 pub async fn send_tx(
@@ -20,22 +21,14 @@ pub async fn send_tx(
     tx_data: TxData,
     next_block: BlockInfo,
     miner_tip: U256,
-    nonce: U256,
+    nonce: U256
 ) -> Result<bool, anyhow::Error> {
-    let my_wallet = get_my_wallet();
-
-    // flashbot identity , could also be a random private key
-    let flashbot_identity = get_flashbot_identity();
-    // flashbot searcher signer, must be the same private key as the wallet used to sign the tx
-    let flashbot_searcher_signer = get_flashbot_searcher();
-
-
     // 500k gas limit, way more than enough for a swap
     let gas_limit = U256::from(500000u128);
 
     let tx_request = Eip1559TransactionRequest {
-        to: Some(NameOrAddress::Address(get_snipe_contract_address())),
-        from: Some(get_my_address()),
+        to: Some(NameOrAddress::Address(*CONTRACT_ADDRESS)),
+        from: Some(*CALLER_ADDRESS),
         data: Some(tx_data.tx_call_data.clone()),
         chain_id: Some(U64::from(1)),
         max_priority_fee_per_gas: Some(miner_tip),
@@ -47,7 +40,7 @@ pub async fn send_tx(
     };
     let frontrun_or_backrun = tx_data.frontrun_or_backrun;
 
-    let signed_tx = sign_eip1559(tx_request, &my_wallet).await?;
+    let signed_tx = sign_eip1559(tx_request, &CALLER_WALLET).await?;
 
     let pending_tx = tx_data.pending_tx.rlp();
 
@@ -63,21 +56,18 @@ pub async fn send_tx(
     let mut is_bundle_included = false;
 
     // ** Send the bundle concurently to all the MEV builders
-    // ** Almost all builders support the same API eth_sendBundle 
-    // Collect all the tasks into this vector
+    // ** Almost all builders support the same API eth_sendBundle
     let mut tasks = Vec::new();
 
     for url in urls {
         let client = client.clone();
         let bundle = bundle.clone();
-        let flashbot_identity = flashbot_identity.clone();
-        let flashbot_searcher_signer = flashbot_searcher_signer.clone();
 
         let task = tokio::spawn(async move {
             // Add signer to Flashbots middleware
             let flashbots_client = SignerMiddleware::new(
-                FlashbotsMiddleware::new(client.clone(), url.clone(), flashbot_identity.clone()),
-                flashbot_searcher_signer.clone()
+                FlashbotsMiddleware::new(client.clone(), url.clone(), FLASHBOT_IDENTITY.clone()),
+                FLASHBOT_SEARCHER.clone()
             );
 
             // only simulate bundle for flashbot relay
@@ -86,7 +76,7 @@ pub async fn send_tx(
 
                 match simulated_bundle {
                     Ok(_sim_result) => {
-                       // log::info!("Simulated Bundle Result: {:?}", sim_result);
+                        // log::info!("Simulated Bundle Result: {:?}", sim_result);
                     }
                     Err(e) => {
                         log::error!("Failed to simulate bundle: {}", e);
@@ -129,9 +119,7 @@ pub async fn send_tx(
     ).await;
 
     for task_result in results {
-        
         if let Ok(inner_result) = task_result {
-            
             if let Ok(included) = inner_result {
                 if included {
                     is_bundle_included = true;
@@ -163,7 +151,6 @@ fn construct_bundle(
     // ** When we snipe we do backrun **
     // ** When we normally sell we dont do frontrun or backrun **
     // ** When we panic sell we do frontrun **
-    // ** check if we do frontrun **
 
     // ** If we do frontrun we push our tx first
     if frontrun_or_backrun == U256::zero() {
@@ -184,7 +171,7 @@ fn construct_bundle(
     } else if frontrun_or_backrun == U256::from(1u128) {
         // ** If we do backrun we push the pending_tx first **
 
-        // ** First we push the pending_tx
+        // ** push the pending_tx
         bundle_request = bundle_request.push_transaction(signed_pending_tx);
 
         // ** Then we push our tx

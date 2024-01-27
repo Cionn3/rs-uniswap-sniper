@@ -5,11 +5,12 @@ pragma solidity >=0.7.0 <0.9.0;
 import {IUniswapV2Pair} from './Uni_interfaces.sol';
 
 // ERC20 interface
-import '../IERC20.sol'; 
+import '../IERC20.sol';
+import {SafeERC20} from '../SafeERC20/SafeERC20.sol';
 
 
 library V2Swapper {
-
+using SafeERC20 for IERC20;
 
 
 
@@ -20,11 +21,12 @@ function _swap_on_V2(
  address output_token,
  uint256 amount_in,
   address pool
-  ) internal returns(uint256) {
+  ) internal returns(uint256 real_amount) {
 
+        uint256 initial_output = IERC20(output_token).balanceOf(address(this));
    
-           // Optimistically send amountIn of inputToken to targetPair
-        IERC20(input_token).transfer(pool, amount_in);
+        // Optimistically send amountIn of inputToken to targetPair
+        IERC20(input_token).safeTransfer(pool, amount_in);
 
         // Prepare variables for calculating expected amount out
         uint reserveIn;
@@ -58,7 +60,8 @@ function _swap_on_V2(
         (uint amount0Out, uint amount1Out) = input_token < output_token ? (uint(0), amountOut) : (amountOut, uint(0));
         IUniswapV2Pair(pool).swap(amount0Out, amount1Out, address(this), new bytes(0));
 
-     return IERC20(output_token).balanceOf(address(this));
+     uint256 amount_out = IERC20(output_token).balanceOf(address(this));
+     real_amount = (initial_output > 0) ? (amount_out - initial_output) : amount_out;
 
 }
 

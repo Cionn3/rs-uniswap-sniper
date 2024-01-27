@@ -6,9 +6,11 @@ import "../interfaces/IERC20.sol";
 
 // Libraries
 import {V2Swapper} from "../interfaces/Uniswap/V2_Swapper.sol";
+import {SafeERC20} from "../interfaces/SafeERC20/SafeERC20.sol";
 
 
 contract Sniper {
+    using SafeERC20 for IERC20;
 
        // CONSTANTS
        // uncoment and add your address
@@ -20,7 +22,6 @@ contract Sniper {
 }
 
 
-// swap function
 // swaps directly on pool
 // swaps input for output
 function snipaaaaaa(
@@ -28,12 +29,13 @@ function snipaaaaaa(
     address output_token,
     address pool,
     uint256 amount_in,
-    uint256 expected_amount
+    uint256 minimum_received
 ) external {
 
     require(msg.sender == SWAP_USER, "Hello Stranger!");
 
         // swap input for ouput
+        // returns real amount (considering any balance left in the contract)
        uint256 amount_out = V2Swapper._swap_on_V2(
             input_token,
             output_token,
@@ -41,16 +43,8 @@ function snipaaaaaa(
             pool
         );
 
-        // expected amount out is calculated with a 10% tolerance
-        // everything lower than that we revert the transaction
-        // passing 0 as expected amount will skip this check
-
-       
-    // Check if expected_amount is provided
-    if (expected_amount != 0) {
-        require(amount_out >= expected_amount, "Yeeeeeeeeet");
-    }
-
+        // passing 0 as minimum_received means we have no slippage set
+        require(amount_out >= minimum_received, "Yeeeeeeeeet");
 }
 
  // ** Withdraw WETH Function
@@ -60,7 +54,7 @@ function snipaaaaaa(
         require(msg.sender == ADMIN, "Hello Stranger!");
 
         // withdraw token
-        IERC20(token).transfer(ADMIN, amount);
+        IERC20(token).safeTransfer(ADMIN, amount);
     }
 
     // ** Withdraw ETH Function
@@ -74,7 +68,7 @@ function snipaaaaaa(
     }
 
 
-    // fallback to receive WETH
+    // fallback to receive ETH
     receive() external payable {}
 
 }
