@@ -83,14 +83,14 @@ lazy_static! {
 
 
 pub fn get_sync_event() -> ethabi::Event {
-    let abi = load_abi_from_file("src/utils/abi/UniswapV2Pair.abi").expect("Failed to load UniswapV2Pair ABI");
-    let contract = ethabi::Contract::load(abi.as_bytes()).expect("Failed to load UniswapV2Pair ABI");
+    let abi = load_abi_from_file("../../src/utils/abi/IUniswapV2Pair.abi").expect("Failed to find UniswapV2Router ABI");
+    let contract = ethabi::Contract::load(abi.as_bytes()).expect("Failed to load UniswapV2Router ABI");
     contract.event("Sync").expect("Failed to extract Sync event").clone()
 }
 
 pub fn get_mint_event() -> ethabi::Event {
-    let abi = load_abi_from_file("src/utils/abi/UniswapV2Pair.abi").expect("Failed to load UniswapV2Pair ABI");
-    let contract = ethabi::Contract::load(abi.as_bytes()).expect("Failed to load UniswapV2Pair ABI");
+    let abi = load_abi_from_file("../../src/utils/abi/IUniswapV2Pair.abi").expect("Failed to find UniswapV2Router ABI");
+    let contract = ethabi::Contract::load(abi.as_bytes()).expect("Failed to load UniswapV2Router ABI");
     contract.event("Mint").expect("Failed to extract Mint event").clone()
 }
 
