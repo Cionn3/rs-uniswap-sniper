@@ -141,7 +141,11 @@ async fn process_anti_rug(
                         convert_wei_to_ether(amount_out_after)
                     );
 
-                    let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
+                    let pending_tx_priority_fee = match pending_tx.transaction_type {
+                        Some(t) if t == U64::from(2) => pending_tx.max_priority_fee_per_gas.unwrap_or_default(),
+                        Some(t) if t == U64::from(1) => pending_tx.gas_price.unwrap_or_default(),
+                        _ => pending_tx.gas_price.unwrap_or_default(),
+                    };
                     let mut miner_tip = calculate_miner_tip(pending_tx_priority_fee);
 
                     // ** make sure the miner tip is not less than the sell priority fee
@@ -152,7 +156,7 @@ async fn process_anti_rug(
                     }
 
                     // ** generate tx data
-                    let (tx_snipe, tx_data) = generate_tx_data(
+                    let (tx_snipe, mut tx_data) = generate_tx_data(
                         &pool,
                         U256::zero(),
                         &next_block,
@@ -162,6 +166,9 @@ async fn process_anti_rug(
                         false, // we sell
                         fork_db
                     ).expect("Failed to generate tx data");
+
+                    // add pending tx
+                    tx_data.pending_tx = pending_tx.clone();
 
                     // ** First check if its worth it to frontrun the tx
                     if tx_snipe.gas_cost > tx_data.expected_amount {
@@ -309,7 +316,11 @@ async fn process_anti_honeypot(
                 log::info!("Amount out Before: ETH {:?}", convert_wei_to_ether(amount_out_before));
                 log::info!("Amount out After: ETH {:?}", convert_wei_to_ether(amount_out_after));
 
-                let pending_tx_priority_fee = pending_tx.max_priority_fee_per_gas.unwrap_or_default();
+                let pending_tx_priority_fee = match pending_tx.transaction_type {
+                    Some(t) if t == U64::from(2) => pending_tx.max_priority_fee_per_gas.unwrap_or_default(),
+                    Some(t) if t == U64::from(1) => pending_tx.gas_price.unwrap_or_default(),
+                    _ => pending_tx.gas_price.unwrap_or_default(),
+                };
                 let mut miner_tip = calculate_miner_tip(pending_tx_priority_fee);
 
                 // ** make sure the miner tip is not less than the sell priority fee
@@ -320,7 +331,7 @@ async fn process_anti_honeypot(
                 }
 
                 // ** generate tx data
-                let (tx_snipe, tx_data) = generate_tx_data(
+                let (tx_snipe, mut tx_data) = generate_tx_data(
                     touched_pool,
                     U256::zero(),
                     &next_block,
@@ -330,6 +341,9 @@ async fn process_anti_honeypot(
                     false, // we sell
                     fork_db
                 ).expect("Failed to generate tx data");
+
+                // add pending tx
+                tx_data.pending_tx = pending_tx.clone();
 
                 // ** First check if its worth it to frontrun the tx
                 if tx_snipe.gas_cost > tx_data.expected_amount {
