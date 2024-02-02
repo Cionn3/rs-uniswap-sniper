@@ -121,11 +121,13 @@ pub async fn take_profit(
     let fork_db = bot_guard.get_fork_db().await;
     drop(bot_guard);
 
+    let amount_in = snipe_tx.amount_in + snipe_tx.gas_cost;
+
     // ** generate tx_data
     let tx_data = profit_taker(
         &next_block,
         snipe_tx.pool,
-        snipe_tx.amount_in,
+        amount_in,
         fork_db
     )?;
 

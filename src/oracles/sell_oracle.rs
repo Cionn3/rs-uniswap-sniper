@@ -110,7 +110,7 @@ async fn process(
             if tx.got_initial_out == false {
                 
                 if tx.is_pending {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    return;
                 }
 
                 // first check just in case if the token pumped to the moon
