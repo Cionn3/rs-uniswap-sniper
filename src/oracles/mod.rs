@@ -29,11 +29,9 @@ pub fn oracle_status(
 
             let bot_guard = bot.read().await;
             let sell_oracle_txs = bot_guard.get_sell_oracle_tx_len().await;
-            let anti_rug_oracle_txs = bot_guard.get_anti_rug_oracle_tx_len().await;
             drop(bot_guard);
 
             log::info!("Sell Oracle: {:?} txs", sell_oracle_txs);
-            log::info!("Anti Rug Oracle: {:?} txs", anti_rug_oracle_txs);
         }
     });
 }

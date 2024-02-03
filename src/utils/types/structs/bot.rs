@@ -14,7 +14,6 @@ pub struct Bot {
     pub block_oracle: Arc<RwLock<BlockOracle>>,
     pub nonce_oracle: Arc<RwLock<NonceOracle>>,
     pub sell_oracle: Arc<RwLock<SellOracle>>,
-    pub anti_rug_oracle: Arc<RwLock<AntiRugOracle>>,
     pub retry_oracle: Arc<RwLock<RetryOracle>>,
     pub fork_db_oracle: Arc<RwLock<ForkOracle>>,
 }
@@ -25,7 +24,6 @@ impl Bot {
         block_oracle: Arc<RwLock<BlockOracle>>,
         nonce_oracle: Arc<RwLock<NonceOracle>>,
         sell_oracle: Arc<RwLock<SellOracle>>,
-        anti_rug_oracle: Arc<RwLock<AntiRugOracle>>,
         retry_oracle: Arc<RwLock<RetryOracle>>,
         fork_db_oracle: Arc<RwLock<ForkOracle>>
     ) -> Self {
@@ -33,7 +31,6 @@ impl Bot {
             block_oracle,
             nonce_oracle,
             sell_oracle,
-            anti_rug_oracle,
             retry_oracle,
             fork_db_oracle,
         }
@@ -76,14 +73,6 @@ impl Bot {
         tx_len
     }
 
-    // get tx len of anti-rug oracle
-    pub async fn get_anti_rug_oracle_tx_len(&self) -> usize {
-        let anti_rug_oracle = self.anti_rug_oracle.write().await;
-        let tx_len = anti_rug_oracle.get_tx_len();
-        drop(anti_rug_oracle);
-
-        tx_len
-    }
 
     // get all snipe tx data from sell oracle
     pub async fn get_sell_oracle_tx_data(&self) -> Vec<SnipeTx> {
@@ -101,12 +90,6 @@ impl Bot {
         drop(sell_oracle);
     }
 
-    // adds a new tx to the anti-rug oracle
-    pub async fn add_anti_rug_tx_data(&mut self, tx_data: SnipeTx) {
-        let mut anti_rug_oracle = self.anti_rug_oracle.write().await;
-        anti_rug_oracle.add_tx_data(tx_data);
-        drop(anti_rug_oracle);
-    }
 
     // removes a tx from the sell oracle
     pub async fn remove_tx_data(&mut self, tx_data: SnipeTx) {
@@ -115,12 +98,6 @@ impl Bot {
         drop(sell_oracle);
     }
 
-    // removes a tx from the anti-rug oracle
-    pub async fn remove_anti_rug_tx_data(&mut self, tx_data: SnipeTx) {
-        let mut anti_rug_oracle = self.anti_rug_oracle.write().await;
-        anti_rug_oracle.remove_tx_data(tx_data);
-        drop(anti_rug_oracle);
-    }
 
     #[allow(dead_code)]
     // updated target amount to sell for a specific tx

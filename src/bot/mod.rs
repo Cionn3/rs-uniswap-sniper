@@ -25,7 +25,6 @@ pub async fn remove_tx_from_oracles(
 ) {
     let mut bot_guard = bot.write().await;
     bot_guard.remove_tx_data(snipe_tx.clone()).await;
-    bot_guard.remove_anti_rug_tx_data(snipe_tx.clone()).await;
     drop(bot_guard);
 }
 
@@ -35,7 +34,6 @@ pub async fn add_tx_to_oracles(
 ) {
     let mut bot_guard = bot.write().await;
     bot_guard.add_tx_data(snipe_tx.clone()).await;
-    bot_guard.add_anti_rug_tx_data(snipe_tx.clone()).await;
     drop(bot_guard);
     
 }

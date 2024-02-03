@@ -125,33 +125,6 @@ impl SellOracle {
     }
 }
 
-// Same as above but for AntiRug
-#[derive(Debug, Clone, PartialEq)]
-pub struct AntiRugOracle {
-    pub tx_data: Vec<SnipeTx>,
-}
-
-impl AntiRugOracle {
-    pub fn new() -> Self {
-        AntiRugOracle { tx_data: Vec::new() }
-    }
-
-    // get the lenght of the vector
-    pub fn get_tx_len(&self) -> usize {
-        self.tx_data.len()
-    }
-
-    pub fn add_tx_data(&mut self, tx_data: SnipeTx) {
-        if !self.tx_data.contains(&tx_data) {
-            self.tx_data.push(tx_data);
-        }
-    }
-
-    pub fn remove_tx_data(&mut self, tx_data: SnipeTx) {
-        log::info!("Anti-Rug Oracle: Removed {:?}", tx_data.pool.token_1);
-        self.tx_data.retain(|x| x.pool.token_1 != tx_data.pool.token_1);
-    }
-}
 
 // Same as above but for Retry
 #[derive(Debug, Clone, PartialEq)]

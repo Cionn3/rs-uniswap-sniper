@@ -211,8 +211,7 @@ async fn process_retry_tx(
         // spawn tasks
         tokio::spawn(async move {
             if tx.is_pending {
-                // wait a little bit to get the response from builders
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                return;
             }
             // find the amount in in case the token has a min buy size
             let amount_in = find_amount_in(

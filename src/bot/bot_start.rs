@@ -39,7 +39,6 @@ pub async fn start(client: Arc<Provider<Ws>>) {
     // Use Arc<RwLock<>> to share Oracles across tasks.
     let sell_oracle = Arc::new(RwLock::new(SellOracle::new()));
     let retry_oracle = Arc::new(RwLock::new(RetryOracle::new()));
-    let anti_rug_oracle = Arc::new(RwLock::new(AntiRugOracle::new()));
     let nonce_oracle = Arc::new(RwLock::new(NonceOracle::new()));
     let fork_db_oracle = Arc::new(RwLock::new(ForkOracle::new(fork_db)));
 
@@ -50,7 +49,6 @@ pub async fn start(client: Arc<Provider<Ws>>) {
                 block_oracle.clone(),
                 nonce_oracle.clone(),
                 sell_oracle.clone(),
-                anti_rug_oracle.clone(),
                 retry_oracle.clone(),
                 fork_db_oracle.clone()
             )
