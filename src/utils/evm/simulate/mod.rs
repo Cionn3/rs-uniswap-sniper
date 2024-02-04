@@ -3,12 +3,10 @@ use std::str::FromStr;
 use ethers::abi::Tokenizable;
 use ethabi::RawLog;
 use revm::EVM;
-use crate::forked_db::fork_db::ForkDB;
-use crate::forked_db::{ match_output, match_output_reverted };
+use crate::forked_db::{ fork_db::ForkDB, match_output, match_output_reverted };
 use crate::oracles::block_oracle::BlockInfo;
-use revm::primitives::{ TransactTo, Log };
 use crate::utils::{ helpers::*, types::structs::pool::Pool };
-use revm::primitives::{ Address as rAddress, U256 as rU256 };
+use revm::primitives::{TransactTo, Log, Address as rAddress, U256 as rU256, Bytes as rBytes};
 
 use crate::utils::evm::insp::access_list::AccessListInspector;
 use crate::utils::abi::{ ERC20_BALANCE_OF, TOKEN0, TOKEN1, V2_SWAP_EVENT, TRANSFER_EVENT, encode_swap };
@@ -19,6 +17,13 @@ use anyhow::anyhow;
 use super::insp::access_list::convert_access_list;
 
 pub mod sim;
+
+pub struct SimulationResult {
+    pub is_reverted: bool,
+    pub logs: Vec<Log>,
+    pub gas_used: u64,
+    pub output: rBytes,
+}
 
 // helper function for generate tx data
 // creates calldata whether we buy or sell
@@ -89,6 +94,7 @@ pub fn get_erc20_balance(
     evm.env.tx.caller = CALLER_ADDRESS.0.into();
     evm.env.tx.transact_to = TransactTo::Call(token.0.into());
     evm.env.tx.data = ERC20_BALANCE_OF.encode("balanceOf", owner).unwrap().0;
+    evm.env.tx.value = rU256::ZERO;
 
     let result = evm.transact_ref()?.result;
 
@@ -129,14 +135,14 @@ fn get_tokens_from_pool(
 
 
 /// Simulates a call without any inspectors
-/// Returns 'is_reverted, logs, gas_used'
+/// Returns [SimulationResult]
 pub fn sim_call(
     caller: Address,
     transact_to: Address,
     call_data: Bytes,
     apply_changes: bool,
     evm: &mut EVM<ForkDB>
-) -> Result<(bool, Vec<Log>, u64), anyhow::Error> {
+) -> Result<SimulationResult, anyhow::Error> {
     evm.env.tx.caller = caller.0.into();
     evm.env.tx.transact_to = TransactTo::Call(transact_to.0.into());
     evm.env.tx.data = call_data.0;
@@ -148,14 +154,18 @@ pub fn sim_call(
     } else {
         result = evm.transact_ref()?.result;
     }
-
+    let is_reverted = match_output_reverted(result.clone());
     let logs = result.logs();
+    let gas_used = result.clone().gas_used();
+    let output = result.into_output().unwrap_or_default();
+    let sim_result = SimulationResult {
+        is_reverted,
+        logs,
+        gas_used,
+        output
+    };
 
-    let gas_used = result.gas_used();
-
-    let is_reverted = match_output_reverted(result);
-
-    Ok((is_reverted, logs, gas_used))
+    Ok(sim_result)
 }
 
 

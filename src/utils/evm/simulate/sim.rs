@@ -58,7 +58,7 @@ pub fn find_amount_in(
             let _ = sim_call(tx.from, tx.to.unwrap_or_default(), tx.input.clone(), true, &mut evm)?;
         }
 
-        let (is_buy_reverted, _, _) = sim_call(
+        let result = sim_call(
             *CALLER_ADDRESS,
             *CONTRACT_ADDRESS,
             call_data.clone().into(),
@@ -66,7 +66,7 @@ pub fn find_amount_in(
             &mut evm
         )?;
 
-        if is_buy_reverted {
+        if result.is_reverted {
             amount_in = amount_in.saturating_sub(decrease_by);
 
             if amount_in < *MIN_BUY_SIZE || attempts >= max_attempts {
@@ -125,7 +125,7 @@ pub fn tax_check(
         U256::from(0u128)
     );
 
-    let (is_buy_reverted, logs, _) = sim_call(
+    let result = sim_call(
         *CALLER_ADDRESS,
         *CONTRACT_ADDRESS,
         call_data.clone().into(),
@@ -137,13 +137,13 @@ pub fn tax_check(
     // 1. Trading is not open yet
     // 2. The token has a maximum or minimum buy size which we may not met
     // we return false so we can push it to retry oracle
-    if is_buy_reverted {
+    if result.is_reverted {
         log::warn!("Buy reverted {:?}", pool.token_1);
         return Ok(false);
     }
 
     // ** we check the logs to see the actual amount of tokens the pool is gonna send us
-    let (real_amount, amount_from_swap) = get_real_amount_from_logs(logs, pool.address)?;
+    let (real_amount, amount_from_swap) = get_real_amount_from_logs(result.logs, pool.address)?;
 
     // if the actual amount of tokens is less than 70% of the amount we should receive
     // then we skip the token
@@ -169,7 +169,7 @@ pub fn tax_check(
     evm.env.block.timestamp = (next_block.timestamp + U256::from(12u128)).into();
 
     // ** Simulate sell
-    let (is_sell_reverted, logs, _) = sim_call(
+    let result = sim_call(
         *CALLER_ADDRESS,
         *CONTRACT_ADDRESS,
         call_data.clone().into(),
@@ -178,13 +178,13 @@ pub fn tax_check(
     )?;
 
     // see if the tx is revrted
-    if is_sell_reverted {
+    if result.is_reverted {
         log::warn!("Sell reverted {:?}", pool.token_1);
         return Ok(false);
     }
 
     // ** check the amount of weth we are going to receive
-    let (real_weth_amount, _) = get_real_amount_from_logs(logs, pool.address)?;
+    let (real_weth_amount, _) = get_real_amount_from_logs(result.logs, pool.address)?;
 
     // if the actual amount of weth is less than 70% of the amount in weth
     // then we skip the token
@@ -248,7 +248,7 @@ pub fn generate_tx_data(
     // set access list to evm
     evm.env.tx.access_list = access_list.clone();
     // simulate call
-    let (_, logs, gas_used) = sim_call(
+    let result = sim_call(
         *CALLER_ADDRESS,
         *CONTRACT_ADDRESS,
         call_data.into(),
@@ -257,10 +257,10 @@ pub fn generate_tx_data(
     )?;
 
     // calculate total gas cost for the transaction
-    let gas_cost = (next_block.base_fee + miner_tip) * gas_used;
+    let gas_cost = (next_block.base_fee + miner_tip) * result.gas_used;
 
     // get the real amount of tokens received
-    let (amount_received, _) = get_real_amount_from_logs(logs, pool.address)?;
+    let (amount_received, _) = get_real_amount_from_logs(result.logs, pool.address)?;
 
     let minimum_received =
         (amount_received * U256::from(*BUY_NUMERATOR)) / U256::from(*BUY_DENOMINATOR);
@@ -277,7 +277,7 @@ pub fn generate_tx_data(
     // ** Generate SnipeTx and TxData
 
     let snipe_tx = SnipeTx::new(
-        gas_used,
+        result.gas_used,
         gas_cost,
         *pool,
         amount_in_weth,
@@ -288,7 +288,7 @@ pub fn generate_tx_data(
 
     let tx_data = TxData::new(
         call_data.into(),
-        gas_used,
+        result.gas_used,
         minimum_received,
         pending_tx.unwrap_or(Transaction::default()),
         U256::from(frontrun_or_backrun),
@@ -336,7 +336,7 @@ pub fn simulate_sell(
     );
 
     // ** Simulate the Sell Transaction
-    let (reverted, logs, _) = sim_call(
+    let result = sim_call(
         *CALLER_ADDRESS,
         *CONTRACT_ADDRESS,
         call_data.clone().into(),
@@ -347,14 +347,14 @@ pub fn simulate_sell(
 
     // if the tx is reverted we return 0
     // cause it will produce no logs
-    if reverted {
+    if result.is_reverted {
         log::warn!("Our tx is reverted, returning 0");
         return Ok(U256::zero());
     }
 
     // ** get the actual amount of weth we are going to receive from the logs
     let (weth_amount, _) = get_real_amount_from_logs(
-        logs,
+        result.logs,
         pool.address,
     )?;
 
@@ -390,7 +390,7 @@ pub fn profit_taker(
     );
 
     // ** Simulate the Buy Transaction
-    let (_, logs, _) = sim_call(
+    let result = sim_call(
         *CALLER_ADDRESS,
         *CONTRACT_ADDRESS,
         call_data.clone().into(),
@@ -400,7 +400,7 @@ pub fn profit_taker(
 
     // get the real amount of tokens we are going to receive
     let (mut amount_of_tokens_to_sell, _) = get_real_amount_from_logs(
-        logs,
+        result.logs,
         pool.address
     )?;
 
@@ -432,7 +432,7 @@ pub fn profit_taker(
     evm.env.tx.access_list = access_list.clone();
 
     // ** simulate the sell tx
-    let (_, logs, gas_used) = sim_call(
+    let result = sim_call(
         *CALLER_ADDRESS,
         *CONTRACT_ADDRESS,
         call_data.clone().into(),
@@ -442,7 +442,7 @@ pub fn profit_taker(
 
     // ** get the amount of weth we are going to receive
     let (real_amount_weth, _) = get_real_amount_from_logs(
-        logs,
+        result.logs,
         pool.address
     )?;
 
@@ -468,7 +468,7 @@ pub fn profit_taker(
     // ** Generate TxData
     let tx_data = TxData::new(
         call_data.into(),
-        gas_used,
+        result.gas_used,
         minimum_received,
         Transaction::default(),
         U256::from(2u128), // 2 because we dont frontrun or back run
@@ -537,7 +537,7 @@ pub fn get_pair(
 
     // simulate pending tx
     evm.env.tx.value = tx.value.into();
-    let (_, logs, _) = sim_call(
+    let result = sim_call(
         tx.from,
         tx.to.unwrap_or_default(),
         tx.input.clone(),
@@ -560,7 +560,7 @@ pub fn get_pair(
     let mut sync_opt = None;
 
     // Collect events
-    for log in &logs {
+    for log in &result.logs {
         let converted_topics: Vec<_> = log.topics
             .iter()
             .map(|b256| H256::from_slice(b256.as_bytes()))
