@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+
+# See more config options https://github.com/foundry-rs/foundry/tree/master/config
+
+# Optimizer Settings
+optimizer = true
+optimizer_runs = 1_000
+via_ir = true
+
+# Solidity compiler version
+solc = "0.8.23"
+
+# Generate Gas Reports For All Contracts
+gas_reports = ["*"]

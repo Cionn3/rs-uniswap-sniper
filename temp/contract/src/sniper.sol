@@ -5,16 +5,17 @@ pragma solidity >=0.7.0 <0.9.0;
 import "../interfaces/IERC20.sol";
 
 // Libraries
-import {Swapper} from "../libraries/Swapper.sol";
+import {V2Swapper} from "../interfaces/Uniswap/V2_Swapper.sol";
 import {SafeERC20} from "../interfaces/SafeERC20/SafeERC20.sol";
 
 
 contract Sniper {
     using SafeERC20 for IERC20;
 
-       // replace with your addresses
-    address public constant SWAP_USER = 0x0000Fd55524058D96255053C0098397E59B9500d;
-    address public constant ADMIN = 0x008712be3C996bb73008f0eA47C5742D653c10A8;
+       // CONSTANTS
+       // uncoment and add your address
+   // address public constant SWAP_USER = 0xyour address;
+  //  address public constant ADMIN = 0xyour address;
 
 
     constructor() {        
@@ -33,8 +34,9 @@ function snipaaaaaa(
 
     require(msg.sender == SWAP_USER, "Hello Stranger!");
 
+        // swap input for ouput
         // returns real amount (considering any balance left in the contract)
-       uint256 amount_out = Swapper._swap_on_V2(
+       uint256 amount_out = V2Swapper._swap_on_V2(
             input_token,
             output_token,
             amount_in,
@@ -45,17 +47,19 @@ function snipaaaaaa(
         require(amount_out >= minimum_received, "Yeeeeeeeeet");
 }
 
+ // ** Withdraw WETH Function
 
     // withdraws any ERC20 token from the contract
     function withdraw(address token, uint256 amount) external {
         require(msg.sender == ADMIN, "Hello Stranger!");
 
-
+        // withdraw token
         IERC20(token).safeTransfer(ADMIN, amount);
     }
 
     // ** Withdraw ETH Function
 
+    // withdraws ETH from the contract
     function withdraw_ETH() external {
 
         require(msg.sender == ADMIN, "Hello Stranger!");
@@ -66,7 +70,5 @@ function snipaaaaaa(
 
     // fallback to receive ETH
     receive() external payable {}
-
-    fallback() external payable {}
 
 }
